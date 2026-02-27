@@ -2,7 +2,7 @@
 name = "kt-assistant"
 version = "0.1.0"
 description = "AI-based Knowledge Transfer Assistant"
-authors = ["Antigravity <antigravity@google.com>"]
+authors = ["Nikhil Maheshwari <[nikhilmaheshwariii10@gmail.com]>"]
 readme = "README.md"
 
 [tool.poetry.dependencies]
@@ -17,6 +17,7 @@ python-dotenv = "^1.0.1"
 sqlalchemy = "^2.0.27"
 markdown-pdf = "*"
 loguru = "^0.7.2"
+pypdf = "^4.0.0"
 
 [build-system]
 requires = ["poetry-core"]

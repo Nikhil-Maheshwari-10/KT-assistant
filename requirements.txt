@@ -8,3 +8,4 @@ python-dotenv>=1.0.1
 sqlalchemy>=2.0.27
 markdown-pdf
 loguru>=0.7.2
+pypdf>=4.0.0
