@@ -1,0 +1,14 @@
+# Python bytecode
+__pycache__/
+*.py[cod]
+
+# Environment & Secrets
+.env
+.venv/
+env/
+
+# Logs
+logs/
+
+# Mac system files
+.DS_Store

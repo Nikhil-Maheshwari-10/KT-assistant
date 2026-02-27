@@ -1,0 +1,10 @@
+streamlit>=1.31.0
+litellm>=1.28.0
+supabase>=2.3.0
+qdrant-client>=1.7.3
+pydantic>=2.6.1
+pydantic-settings>=2.1.0
+python-dotenv>=1.0.1
+sqlalchemy>=2.0.27
+markdown-pdf
+loguru>=0.7.2

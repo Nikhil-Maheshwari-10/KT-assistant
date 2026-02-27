@@ -1,0 +1,23 @@
+[tool.poetry]
+name = "kt-assistant"
+version = "0.1.0"
+description = "AI-based Knowledge Transfer Assistant"
+authors = ["Antigravity <antigravity@google.com>"]
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = "^3.11"
+streamlit = "^1.31.0"
+litellm = "^1.28.0"
+supabase = "^2.3.0"
+qdrant-client = "^1.7.3"
+pydantic = "^2.6.1"
+pydantic-settings = "^2.1.0"
+python-dotenv = "^1.0.1"
+sqlalchemy = "^2.0.27"
+markdown-pdf = "*"
+loguru = "^0.7.2"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
