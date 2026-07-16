@@ -14,7 +14,8 @@ from app.models.schemas import Session, Topic, Message, TopicKnowledge
 from app.services.db_service import db_service
 from app.services.ai_engine import ai_engine
 from app.services.vector_service import vector_service
-from app.services.doc_processor import extract_text_from_file
+from app.services.doc_processor import extract_text_from_file, chunk_text
+from app.services.github_service import fetch_repo_content
 
 st.set_page_config(page_title="KT Assistant", layout="wide", initial_sidebar_state="expanded")
 
@@ -48,6 +49,19 @@ def process_knowledge(text: str):
     
     st.session_state.session.overall_confidence = int(sum(t.confidence_score for t in st.session_state.session.topics) / len(st.session_state.session.topics))
     db_service.save_session(st.session_state.session)
+
+
+def index_chunks(chunks: list):
+    """Embeds and indexes raw content chunks into Qdrant for Q&A RAG."""
+    if not chunks:
+        return
+    texts = [c["content"] for c in chunks]
+    with st.spinner(f"Indexing {len(chunks)} content chunks for Q&A..."):
+        embeddings = ai_engine.get_embeddings_batch(texts)
+        vector_service.upsert_content_chunks(
+            st.session_state.session_id, chunks, embeddings
+        )
+    logger.info(f"Indexed {len(chunks)} chunks for session {st.session_state.session_id}")
 
 # --- View State & Session Logic ---
 if "view" not in st.session_state:
@@ -308,6 +322,56 @@ else:
                 st.rerun()
 
         st.divider()
+        st.subheader("🐙 GitHub Repository")
+        github_url = st.text_input(
+            "GitHub URL",
+            placeholder="https://github.com/owner/repo",
+            label_visibility="collapsed",
+            key="github_url_input"
+        )
+        if st.button("🚀 Fetch & Analyse Repo", key="github_fetch_btn", use_container_width=True):
+            if not github_url.strip():
+                st.warning("Please enter a GitHub repository URL first.")
+            else:
+                with st.spinner("Fetching repository files from GitHub..."):
+                    ingest_result = fetch_repo_content(github_url.strip())
+
+                if not ingest_result.success:
+                    st.error(f"❌ {ingest_result.error}")
+                else:
+                    # Inject a chat message so the history reflects the source
+                    repo_msg = Message(
+                        role="user",
+                        content=(
+                            f"🐙 **GitHub Repository Ingested:** `{ingest_result.owner}/{ingest_result.repo}` "
+                            f"(branch: `{ingest_result.branch}`) — "
+                            f"{len(ingest_result.files_fetched)} files, "
+                            f"{ingest_result.total_chars / 1024:.1f} KB processed."
+                        )
+                    )
+                    st.session_state.chat_history.append(repo_msg)
+                    db_service.save_message(st.session_state.session_id, repo_msg)
+
+                    # Feed into KT topic scoring pipeline
+                    with st.spinner("Analysing repository content across KT topics..."):
+                        process_knowledge(ingest_result.aggregated_text)
+
+                    # Index raw chunks into Qdrant for Q&A
+                    index_chunks(ingest_result.chunks)
+
+                    # Store file manifest for intent-based routing (STRUCTURAL queries)
+                    st.session_state.file_manifest = ingest_result.files_fetched
+
+                    st.success(
+                        f"✅ Fetched **{len(ingest_result.files_fetched)} files** "
+                        f"({ingest_result.total_chars / 1024:.1f} KB, {len(ingest_result.chunks)} chunks) from "
+                        f"`{ingest_result.owner}/{ingest_result.repo}`. "
+                        f"Coverage & Q&A ready!"
+                    )
+                    logger.info(f"GitHub repo ingested: {ingest_result.summary}")
+                    st.rerun()
+
+        st.divider()
         st.subheader("📁 Knowledge Upload")
         uploaded_file = st.file_uploader("Upload PDF or TXT", type=["pdf", "txt"], label_visibility="collapsed")
         if uploaded_file:
@@ -316,90 +380,130 @@ else:
                     file_bytes = uploaded_file.read()
                     text = extract_text_from_file(file_bytes, uploaded_file.name)
                     if text:
-                        # Add notification to chat
                         doc_msg = Message(role="user", content=f"📄 **Uploaded Document:** {uploaded_file.name}")
                         st.session_state.chat_history.append(doc_msg)
                         db_service.save_message(st.session_state.session_id, doc_msg)
                         
-                        # Process knowledge
+                        # KT topic scoring
                         process_knowledge(text)
+
+                        # Index raw chunks for Q&A
+                        file_chunks = chunk_text(text, source_name=uploaded_file.name,
+                                                  chunk_size=settings.CHUNK_SIZE,
+                                                  chunk_overlap=settings.CHUNK_OVERLAP)
+                        index_chunks(file_chunks)
+
+                        # Extend file manifest for intent routing
+                        existing = st.session_state.get("file_manifest", [])
+                        if uploaded_file.name not in existing:
+                            st.session_state.file_manifest = existing + [uploaded_file.name]
                         
                         st.session_state.last_uploaded_file = uploaded_file.name
-                        st.success(f"Processed {uploaded_file.name}!")
+                        st.success(f"✅ Processed {uploaded_file.name} — {len(file_chunks)} chunks indexed for Q&A!")
                         st.rerun()
                     else:
                         st.error("Could not read file content.")
-        
-        st.divider()
-        st.subheader("🔍 Search Knowledge base")
-        
-        # Check if any knowledge is actually indexed yet
-        any_indexed = any(t.is_complete for t in st.session_state.session.topics)
-        
-        if any_indexed:
-            search_query = st.text_input("Ask a question about the system...")
-            if search_query:
-                with st.spinner("Searching indexed knowledge..."):
-                    query_vec = ai_engine.get_embedding(search_query)
-                    results = vector_service.search_kt(query_vec, limit=2)
-                    
-                    if results:
-                        st.success("Found relevant info!")
-                        context_text = "\n\n".join([f"Topic: {r['topic']}\nDetails: {r['summary']}" for r in results])
-                        
-                        # Generate an answer
-                        qa_prompt = [
-                            {"role": "system", "content": f"You are a technical assistant. Use the following context retrieved from a Knowledge Transfer session to answer the user's question accurately. If the context doesn't contain the answer, say you don't know.\n\nContext:\n{context_text}"},
-                            {"role": "user", "content": search_query}
-                        ]
-                        answer = ai_engine.get_completion(qa_prompt)
-                        st.info(f"**AI Answer:**\n{answer}")
-                    else:
-                        st.warning("No relevant knowledge found for your specific query.")
-        else:
-            st.info("The Knowledge base will unlock once you complete at least one topic.")
 
     # --- Main Chat ---
-    st.header("KT Interrogation")
+    # Mode toggle
+    has_chunks = any(t.confidence_score > 0 for t in st.session_state.session.topics)
+
+    col_title, col_toggle = st.columns([3, 2])
+    with col_title:
+        st.header("KT Assistant Chat")
+    with col_toggle:
+        chat_mode = st.radio(
+            "Chat Mode",
+            options=["💬 Q&A", "📥 Add Knowledge"],
+            horizontal=True,
+            key="chat_mode_radio",
+            label_visibility="collapsed",
+        )
+
+    # Mode hint
+    if chat_mode == "💬 Q&A":
+        if has_chunks:
+            st.caption("Ask any question about the uploaded project — answers come from the actual files.")
+        else:
+            st.info("📂 Upload a GitHub repository or document via the sidebar to enable Q&A.")
+    else:
+        st.caption("Tell the assistant more about the system to improve coverage scores.")
 
     # Display chat messages
     for message in st.session_state.chat_history:
         with st.chat_message(message.role):
             st.markdown(message.content)
 
-    # Chat Input
-    if prompt := st.chat_input("Explain the system..."):
-        # 1. User Message
-        user_msg = Message(role="user", content=prompt)
-        st.session_state.chat_history.append(user_msg)
-        db_service.save_message(st.session_state.session_id, user_msg)
-        
-        with st.chat_message("user"):
-            st.markdown(prompt)
+    # --- Q&A Mode ---
+    if chat_mode == "💬 Q&A":
+        placeholder = "Ask anything about the uploaded project..."
+        if prompt := st.chat_input(placeholder, disabled=not has_chunks):
+            user_msg = Message(role="user", content=prompt)
+            st.session_state.chat_history.append(user_msg)
+            db_service.save_message(st.session_state.session_id, user_msg)
+            with st.chat_message("user"):
+                st.markdown(prompt)
 
-        # 2. Process Response (AI Multi-Topic Validator)
-        with st.spinner("Analyzing response..."):
-            process_knowledge(prompt)
+            with st.chat_message("assistant"):
+                # Phase 1: classify intent + fetch context (interactive status)
+                with st.status("Analyzing question...", expanded=True) as status:
+                    intents, token_stream = ai_engine.route_and_stream(
+                        question=prompt,
+                        session=st.session_state.session,
+                        session_id=st.session_state.session_id,
+                        file_manifest=st.session_state.get("file_manifest", []),
+                        vector_service=vector_service,
+                    )
+                    
+                    intent_labels = {
+                        "STRUCTURAL": "📁 file structure",
+                        "CONTENT": "🔍 code search",
+                        "OPERATIONAL": "⚙️ ops knowledge",
+                        "BROAD": "🌐 full overview",
+                    }
+                    sources = " + ".join(intent_labels.get(i, i) for i in intents)
+                    status.update(label=f"Sourced via: {sources}", state="complete", expanded=False)
 
-        # 3. AI Interrogator (Next Question)
-        active_topic = st.session_state.session.topics[current_topic_idx]
-        with st.chat_message("assistant"):
-            with st.spinner("Thinking..."):
-                # If current topic complete, move to next or summarize
-                if active_topic.is_complete and current_topic_idx + 1 < len(st.session_state.session.topics):
-                    next_topic = st.session_state.session.topics[current_topic_idx + 1]
-                    response = f"Great! I have a solid understanding of '{active_topic.name}'. Let's move to '{next_topic.name}'. "
-                    response += ai_engine.interrogate(st.session_state.session, st.session_state.chat_history, next_topic)
-                elif all(t.is_complete for t in st.session_state.session.topics):
-                    response = "I have gathered all the necessary information. The KT session is complete! You can now generate the final summary from the sidebar."
-                else:
-                    response = ai_engine.interrogate(st.session_state.session, st.session_state.chat_history, active_topic)
-                
-                st.markdown(response)
-                ai_msg = Message(role="assistant", content=response)
+                # Phase 2: stream the answer token-by-token
+                answer = st.write_stream(token_stream)
+
+                ai_msg = Message(role="assistant", content=answer)
                 st.session_state.chat_history.append(ai_msg)
                 db_service.save_message(st.session_state.session_id, ai_msg)
                 st.rerun()
+
+    # --- Add Knowledge Mode ---
+    else:
+        placeholder = "Tell me more about the system..."
+        if prompt := st.chat_input(placeholder):
+            user_msg = Message(role="user", content=prompt)
+            st.session_state.chat_history.append(user_msg)
+            db_service.save_message(st.session_state.session_id, user_msg)
+            with st.chat_message("user"):
+                st.markdown(prompt)
+
+            # Update topic knowledge
+            with st.spinner("Analyzing response..."):
+                process_knowledge(prompt)
+
+            # AI follow-up question
+            active_topic = st.session_state.session.topics[current_topic_idx]
+            with st.chat_message("assistant"):
+                with st.spinner("Thinking..."):
+                    if active_topic.is_complete and current_topic_idx + 1 < len(st.session_state.session.topics):
+                        next_topic = st.session_state.session.topics[current_topic_idx + 1]
+                        response = f"Great! I have a solid understanding of '{active_topic.name}'. Let's move to '{next_topic.name}'. "
+                        response += ai_engine.interrogate(st.session_state.session, st.session_state.chat_history, next_topic)
+                    elif all(t.is_complete for t in st.session_state.session.topics):
+                        response = "I have gathered all the necessary information. The KT session is complete! You can now generate the final summary from the sidebar."
+                    else:
+                        response = ai_engine.interrogate(st.session_state.session, st.session_state.chat_history, active_topic)
+
+                    st.markdown(response)
+                    ai_msg = Message(role="assistant", content=response)
+                    st.session_state.chat_history.append(ai_msg)
+                    db_service.save_message(st.session_state.session_id, ai_msg)
+                    st.rerun()
 
     # --- Display Summary if generated ---
     if "final_summary" in st.session_state:

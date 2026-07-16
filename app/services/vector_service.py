@@ -44,13 +44,14 @@ class VectorService:
                 )
                 logger.info(f"Created Qdrant collection: {collection_name}")
             
-            # Ensure payload index for session_id exists (required for deletion filters)
+            # Ensure payload indexes exist (required for filtering in search)
             if hasattr(self.client, "create_payload_index"):
-                self.client.create_payload_index(
-                    collection_name=collection_name,
-                    field_name="session_id",
-                    field_schema=models.PayloadSchemaType.KEYWORD
-                )
+                for field in ("session_id", "type"):
+                    self.client.create_payload_index(
+                        collection_name=collection_name,
+                        field_name=field,
+                        field_schema=models.PayloadSchemaType.KEYWORD
+                    )
         except Exception as e:
             logger.error(f"Error ensuring Qdrant collection or index: {e}")
 
@@ -83,16 +84,71 @@ class VectorService:
         except Exception as e:
             logger.error(f"Error upserting to Qdrant: {e}")
 
-    def search_kt(self, query_embedding: List[float], limit: int = 5) -> List[Dict]:
+    def upsert_content_chunks(self, session_id: str, chunks: List[Dict], embeddings: List[List[float]]):
+        """
+        Stores raw content chunks (from GitHub/file upload) into Qdrant for RAG Q&A.
+        Each chunk has type='content_chunk' to distinguish it from topic summaries.
+        """
+        if not self.client or not chunks:
+            return
+
+        points = []
+        for chunk, embedding in zip(chunks, embeddings):
+            point_id = str(uuid.uuid5(
+                uuid.NAMESPACE_DNS,
+                f"{session_id}_chunk_{chunk['file_path']}_{chunk['chunk_index']}"
+            ))
+            points.append(models.PointStruct(
+                id=point_id,
+                vector=embedding,
+                payload={
+                    "session_id": session_id,
+                    "type": "content_chunk",
+                    "file_path": chunk["file_path"],
+                    "content": chunk["content"],
+                    "chunk_index": chunk["chunk_index"],
+                }
+            ))
+
+        try:
+            # Batch upsert in groups of 50 to avoid request size limits
+            batch_size = 50
+            for i in range(0, len(points), batch_size):
+                self.client.upsert(
+                    collection_name=settings.QDRANT_COLLECTION,
+                    points=points[i:i + batch_size]
+                )
+            logger.info(f"Indexed {len(points)} content chunks for session {session_id}")
+        except Exception as e:
+            logger.error(f"Error upserting content chunks to Qdrant: {e}")
+
+    def search_chunks(self, session_id: str, query_embedding: List[float], limit: int = 5) -> List[Dict]:
+        """
+        Semantic search over content chunks scoped strictly to the current session.
+        Returns list of chunk payloads ordered by relevance.
+        """
         if not self.client:
             return []
 
+        chunk_filter = models.Filter(
+            must=[
+                models.FieldCondition(
+                    key="session_id",
+                    match=models.MatchValue(value=session_id)
+                ),
+                models.FieldCondition(
+                    key="type",
+                    match=models.MatchValue(value="content_chunk")
+                )
+            ]
+        )
+
         try:
-            # Try newer query_points API first (v1.10+) or fallback to search
             if hasattr(self.client, "query_points"):
                 results = self.client.query_points(
                     collection_name=settings.QDRANT_COLLECTION,
                     query=query_embedding,
+                    query_filter=chunk_filter,
                     limit=limit
                 ).points
                 return [hit.payload for hit in results]
@@ -100,6 +156,48 @@ class VectorService:
                 results = self.client.search(
                     collection_name=settings.QDRANT_COLLECTION,
                     query_vector=query_embedding,
+                    query_filter=chunk_filter,
+                    limit=limit
+                )
+                return [hit.payload for hit in results]
+            else:
+                logger.error("QdrantClient missing search methods.")
+                return []
+        except Exception as e:
+            logger.error(f"Error searching content chunks in Qdrant: {e}")
+            return []
+
+    def delete_session_vectors(self, session_id: str):
+        if not self.client:
+            return []
+
+        # Scope results to current session only (prevents cross-session leakage)
+        session_filter = None
+        if session_id:
+            session_filter = models.Filter(
+                must=[
+                    models.FieldCondition(
+                        key="session_id",
+                        match=models.MatchValue(value=session_id)
+                    )
+                ]
+            )
+
+        try:
+            # Try newer query_points API first (v1.10+) or fallback to search
+            if hasattr(self.client, "query_points"):
+                results = self.client.query_points(
+                    collection_name=settings.QDRANT_COLLECTION,
+                    query=query_embedding,
+                    query_filter=session_filter,
+                    limit=limit
+                ).points
+                return [hit.payload for hit in results]
+            elif hasattr(self.client, "search"):
+                results = self.client.search(
+                    collection_name=settings.QDRANT_COLLECTION,
+                    query_vector=query_embedding,
+                    query_filter=session_filter,
                     limit=limit
                 )
                 return [hit.payload for hit in results]

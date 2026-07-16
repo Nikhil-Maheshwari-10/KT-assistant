@@ -1,5 +1,5 @@
 import io
-from typing import Optional
+from typing import Optional, List, Dict
 import logging
 
 try:
@@ -49,3 +49,38 @@ def extract_text_from_file(file_bytes: bytes, file_name: str) -> Optional[str]:
             return None
             
     return None
+
+
+def chunk_text(text: str, source_name: str, chunk_size: int = 1000, chunk_overlap: int = 100) -> List[Dict]:
+    """
+    Splits a block of text into overlapping chunks suitable for embedding.
+
+    Args:
+        text:        The raw text to split.
+        source_name: Label for the source (file path, URL, etc.) stored in each chunk.
+        chunk_size:  Target character length per chunk.
+        chunk_overlap: Characters of overlap between consecutive chunks.
+
+    Returns:
+        List of dicts: [{"file_path": str, "content": str, "chunk_index": int}, ...]
+    """
+    chunks = []
+    start = 0
+    chunk_index = 0
+
+    while start < len(text):
+        end = min(start + chunk_size, len(text))
+        chunk_content = text[start:end].strip()
+        if chunk_content:
+            chunks.append({
+                "file_path": source_name,
+                "content": chunk_content,
+                "chunk_index": chunk_index,
+            })
+            chunk_index += 1
+        if end >= len(text):
+            break
+        start += chunk_size - chunk_overlap
+
+    return chunks
+
