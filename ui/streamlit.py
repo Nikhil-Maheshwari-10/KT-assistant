@@ -19,6 +19,15 @@ from app.services.github_service import fetch_repo_content
 
 st.set_page_config(page_title="KT Assistant", layout="wide", initial_sidebar_state="expanded")
 
+# Hide Streamlit's default "Press Enter to submit form" instructions
+st.markdown("""
+    <style>
+    div[data-testid="InputInstructions"] {
+        display: none !important;
+    }
+    </style>
+""", unsafe_allow_html=True)
+
 def process_knowledge(text: str):
     """Processes technical knowledge across all topics and updates the session state."""
     all_results = ai_engine.multi_topic_validate_and_score(st.session_state.session, text)
@@ -124,7 +133,7 @@ if st.session_state.view == "chat":
 
     if "chat_history" not in st.session_state:
         st.session_state.chat_history = []
-        greeting = Message(role="assistant", content="Hello! I'm your Knowledge Transfer Assistant. Let's start the KT session. Can you give me a high-level overview of the system we're documenting today?")
+        greeting = Message(role="assistant", content="Hello! I'm your KT Assistant. Upload a GitHub repository or document from the sidebar, then ask me anything about your codebase and document it.")
         st.session_state.chat_history.append(greeting)
         db_service.save_message(st.session_state.session_id, greeting)
 
@@ -206,29 +215,29 @@ if st.session_state.view == "landing":
     with st.container():
         st.markdown('<div class="main-container">', unsafe_allow_html=True)
         st.markdown('<h1 class="hero-title">Knowledge Transfer Assistant</h1>', unsafe_allow_html=True)
-        st.markdown('<p class="hero-desc">I am your technical documentation partner. I don\'t just record what you say—I actively interview you to uncover architectural details, operational risks, and system complexities.</p>', unsafe_allow_html=True)
+        st.markdown('<p class="hero-desc">I am your technical documentation partner. Upload your GitHub repository or documents, and I will instantly analyze your codebase to help you generate comprehensive technical documentation.</p>', unsafe_allow_html=True)
         
         st.markdown("""
             <div class="highlight-box">
                 <div class="highlight-item">
-                    <span class="highlight-icon">🧠</span>
+                    <span class="highlight-icon">🐙</span>
                     <div class="highlight-text">
-                        <b>Active Interrogation</b>
-                        <p>I ask probing questions to move beyond basic summaries and capture deep technical nuances.</p>
+                        <b>Automated Codebase Analysis</b>
+                        <p>Upload a GitHub repository or documentation files to instantly ingest your entire project context.</p>
                     </div>
                 </div>
                 <div class="highlight-item">
-                    <span class="highlight-icon">📊</span>
+                    <span class="highlight-icon">💬</span>
                     <div class="highlight-text">
-                        <b>Coverage Scoring</b>
-                        <p>I track progress against key topics like Architecture, Data Flow, and Reliability to ensure zero knowledge gaps.</p>
+                        <b>Intelligent Q&A</b>
+                        <p>Ask questions about your codebase and get accurate answers backed by your project's code and documentation.</p>
                     </div>
                 </div>
                 <div class="highlight-item">
                     <span class="highlight-icon">📄</span>
                     <div class="highlight-text">
                         <b>Structured Artifacts</b>
-                        <p>Once complete, I transform our dialogue into a professional technical document ready for your team.</p>
+                        <p>Automatically track topic coverage and generate a professional technical document ready for your team.</p>
                     </div>
                 </div>
             </div>
@@ -251,7 +260,7 @@ if st.session_state.view == "landing":
             db_service.save_session(st.session_state.session)
             
             st.session_state.chat_history = []
-            greeting = Message(role="assistant", content="Hello! I'm your Knowledge Transfer Assistant. Let's start the KT session. Can you give me a high-level overview of the system we're documenting today?")
+            greeting = Message(role="assistant", content="Hello! I'm your KT Assistant. Upload a GitHub repository or document from the sidebar, then ask me anything about your codebase and document it.")
             st.session_state.chat_history.append(greeting)
             db_service.save_message(new_id, greeting)
             
@@ -298,7 +307,8 @@ else:
                     "GitHub URL",
                     placeholder="https://github.com/owner/repo",
                     label_visibility="collapsed",
-                    key="github_url_input"
+                    key="github_url_input",
+                    autocomplete="off"
                 )
                 submitted = st.form_submit_button("🚀 Fetch & Analyse Repo", use_container_width=True)
                 
@@ -378,15 +388,12 @@ else:
     st.header("KT Assistant Chat")
 
     if not has_chunks:
-        st.info("📂 Upload a GitHub repository or document via the sidebar to enable Q&A.")
+        st.info("📂 Upload a GitHub repository or document via the sidebar to enable chat.")
 
     # Display chat messages
     for i, message in enumerate(st.session_state.chat_history):
         with st.chat_message(message.role):
-            if i == 0 and message.role == "assistant" and "Let's start the KT session" in message.content:
-                st.markdown("Hello! I'm your KT Assistant. Upload a GitHub repository or document from the sidebar, then ask me anything about your codebase and document it.")
-            else:
-                st.markdown(message.content)
+            st.markdown(message.content)
 
     # --- Q&A Chat ---
     if prompt := st.chat_input("Ask anything about the uploaded project...", disabled=not has_chunks):
