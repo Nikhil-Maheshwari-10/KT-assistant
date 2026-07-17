@@ -280,6 +280,7 @@ else:
         with tab_progress:
             overall_progress = sum(t.confidence_score for t in st.session_state.session.topics) / len(st.session_state.session.topics)
             st.metric(label="Overall Readiness", value=f"{overall_progress:.1f}%")
+            st.caption(f"Required: **{settings.KT_CONFIDENCE_THRESHOLD}%** across all topics to generate final document.")
             
             st.markdown("### Topics")
             for i, topic in enumerate(st.session_state.session.topics):
@@ -289,7 +290,7 @@ else:
             st.divider()
             
             can_generate = all(t.confidence_score >= settings.KT_CONFIDENCE_THRESHOLD for t in st.session_state.session.topics)
-            if st.button("Generate Final Summary", type="primary", disabled=not can_generate, use_container_width=True):
+            if st.button("Generate Final Document", type="primary", disabled=not can_generate, use_container_width=True):
                 logger.info(f"User triggered final summary generation for session: {st.session_state.session_id}")
                 with st.spinner("Generating professional KT document..."):
                     summary = ai_engine.generate_final_summary(st.session_state.session)
