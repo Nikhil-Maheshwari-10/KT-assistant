@@ -11,6 +11,9 @@ class TopicKnowledge(BaseModel):
     edge_cases: Optional[str] = None
     operational_steps: Optional[str] = None
     monitoring_deployment: Optional[str] = Field(None, alias="monitoring / deployment")
+    # Flexible bucket: LLM can store any system-specific sub-sections here
+    # e.g. {"Model Training": "...", "API Contracts": "..."}
+    free_form: Dict[str, str] = Field(default_factory=dict)
 
     @field_validator("*", mode="before")
     @classmethod

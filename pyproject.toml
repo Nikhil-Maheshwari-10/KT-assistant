@@ -15,9 +15,11 @@ pydantic = "^2.6.1"
 pydantic-settings = "^2.1.0"
 python-dotenv = "^1.0.1"
 sqlalchemy = "^2.0.27"
-markdown-pdf = "*"
+playwright = "^1.40.0"
+markdown = "^3.5.0"
 loguru = "^0.7.2"
 pypdf = "^4.0.0"
+requests = "^2.31.0"
 
 [build-system]
 requires = ["poetry-core"]
