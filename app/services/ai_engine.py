@@ -302,7 +302,6 @@ If the answer is not in the context, say: "This specific detail is not available
 
         def _token_stream():
             try:
-                time.sleep(0.5)  # standard delay before streaming call
                 response = litellm.completion(
                     model=self.secondary_model,
                     messages=messages,
