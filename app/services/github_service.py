@@ -122,10 +122,11 @@ def parse_github_url(url: str) -> Optional[tuple[str, str, Optional[str]]]:
     url = re.sub(r"^https?://", "", url)
     url = re.sub(r"^www\.", "", url)
 
-    if not url.startswith("github.com/"):
-        return None
+    # If it's a full URL, strip the domain. Otherwise assume it's owner/repo
+    if url.startswith("github.com/"):
+        url = url[len("github.com/"):]
 
-    parts = url[len("github.com/"):].split("/")
+    parts = url.split("/")
     if len(parts) < 2:
         return None
 
@@ -134,7 +135,7 @@ def parse_github_url(url: str) -> Optional[tuple[str, str, Optional[str]]]:
 
     branch = None
     if len(parts) >= 4 and parts[2] == "tree":
-        branch = parts[3]
+        branch = "/".join(parts[3:])
 
     return owner, repo, branch
 
@@ -175,7 +176,7 @@ def _build_headers(token: Optional[str] = None) -> dict:
     return headers
 
 
-def _get_default_branch(owner: str, repo: str, token: Optional[str]) -> str:
+def _get_default_branch(owner: str, repo: str, token: Optional[str] = None) -> str:
     """Fetches the default branch name from the repo metadata."""
     url = f"{GITHUB_API}/repos/{owner}/{repo}"
     try:
@@ -185,6 +186,24 @@ def _get_default_branch(owner: str, repo: str, token: Optional[str]) -> str:
     except Exception as e:
         logger.warning(f"Could not determine default branch for {owner}/{repo}: {e}. Falling back to 'main'.")
         return "main"
+
+
+def fetch_branches(github_url: str, token: Optional[str] = None) -> list[str]:
+    """Fetches all branches for a given GitHub repository URL."""
+    parsed = parse_github_url(github_url)
+    if not parsed:
+        return []
+        
+    owner, repo, _ = parsed
+    url = f"{GITHUB_API}/repos/{owner}/{repo}/branches"
+    
+    try:
+        resp = requests.get(url, headers=_build_headers(token), timeout=10)
+        resp.raise_for_status()
+        return [branch["name"] for branch in resp.json()]
+    except Exception as e:
+        logger.warning(f"Could not fetch branches for {owner}/{repo}: {e}")
+        return []
 
 
 def _get_repo_tree(owner: str, repo: str, branch: str, token: Optional[str]) -> list[dict]:

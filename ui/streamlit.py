@@ -317,22 +317,47 @@ else:
 
         with tab_data:
             st.subheader("🐙 GitHub Repository")
-            with st.form(key="github_fetch_form", border=False):
-                github_url = st.text_input(
-                    "GitHub URL",
-                    placeholder="https://github.com/owner/repo",
-                    label_visibility="collapsed",
-                    key="github_url_input",
-                    autocomplete="off"
-                )
-                submitted = st.form_submit_button("🚀 Fetch & Analyse Repo", use_container_width=True)
-                
-            if submitted:
-                if not github_url.strip():
+            github_url_raw = st.text_input(
+                "GitHub URL",
+                placeholder="https://github.com/owner/repo",
+                label_visibility="collapsed",
+                key="github_url_input",
+                autocomplete="off"
+            )
+            
+            # 1. Button to load branches
+            if st.button("Load Branches", use_container_width=True):
+                if not github_url_raw.strip():
                     st.warning("Please enter a GitHub repository URL first.")
                 else:
+                    from app.services.github_service import parse_github_url, fetch_branches
+                    parsed = parse_github_url(github_url_raw)
+                    if parsed:
+                        with st.spinner("Fetching branches..."):
+                            branches = fetch_branches(github_url_raw)
+                        if branches:
+                            st.session_state.github_branches = branches
+                            st.session_state.github_parsed_url = parsed
+                            st.session_state.github_raw_url = github_url_raw
+                        else:
+                            st.error("No branches found or repository is private.")
+                    else:
+                        st.error("Invalid GitHub URL format. Please provide a full repository URL (e.g., https://github.com/owner/repo).")
+
+            # 2. Show branch selector and final action if branches are loaded for the current URL
+            if "github_branches" in st.session_state and st.session_state.get("github_raw_url") == github_url_raw:
+                branches = st.session_state.github_branches
+                owner, repo, branch_hint = st.session_state.github_parsed_url
+                
+                default_idx = branches.index(branch_hint) if branch_hint in branches else 0
+                selected_branch = st.selectbox("Select Branch", branches, index=default_idx)
+                final_github_url = f"https://github.com/{owner}/{repo}/tree/{selected_branch}"
+                
+                submitted = st.button("🚀 Analyse Repository", use_container_width=True, type="primary")
+                    
+                if submitted:
                     with st.spinner("Fetching repository files from GitHub..."):
-                        ingest_result = fetch_repo_content(github_url.strip())
+                        ingest_result = fetch_repo_content(final_github_url.strip())
                     if not ingest_result.success:
                         st.error(f"❌ {ingest_result.error}")
                     else:
