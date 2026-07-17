@@ -279,8 +279,8 @@ else:
 
         with tab_progress:
             overall_progress = sum(t.confidence_score for t in st.session_state.session.topics) / len(st.session_state.session.topics)
-            st.metric(label="Overall Readiness", value=f"{overall_progress:.1f}%")
-            st.caption(f"Required: **{settings.KT_CONFIDENCE_THRESHOLD}%** across all topics to generate final document.")
+            st.metric(label="Overall Coverage", value=f"{overall_progress:.1f}%")
+            st.caption(f"Recommended **{settings.KT_CONFIDENCE_THRESHOLD}%** coverage across all topics for best results.")
             
             st.markdown("### Topics")
             for i, topic in enumerate(st.session_state.session.topics):
@@ -288,10 +288,12 @@ else:
                 st.markdown(f"**{status_icon} {topic.name}** ({topic.confidence_score}%)")
 
             st.divider()
-            
-            can_generate = all(t.confidence_score >= settings.KT_CONFIDENCE_THRESHOLD for t in st.session_state.session.topics)
-            if st.button("Generate Final Document", type="primary", disabled=not can_generate, use_container_width=True):
-                logger.info(f"User triggered final summary generation for session: {st.session_state.session_id}")
+
+
+
+            has_any_content = any(t.confidence_score > 0 for t in st.session_state.session.topics)
+            if st.button("Generate Final Document", type="primary", disabled=not has_any_content, use_container_width=True):
+                logger.info(f"User triggered final document generation for session: {st.session_state.session_id}")
                 with st.spinner("Generating professional KT document..."):
                     summary = ai_engine.generate_final_summary(st.session_state.session)
                     import re
@@ -299,7 +301,7 @@ else:
                     st.session_state.final_summary = clean_summary
                     if "pdf_bytes" in st.session_state:
                         del st.session_state["pdf_bytes"]
-                    st.success("Summary generated!")
+                    st.success("Document generated!")
 
         with tab_data:
             st.subheader("🐙 GitHub Repository")
@@ -424,50 +426,364 @@ else:
     # --- Display Summary if generated ---
     if "final_summary" in st.session_state:
         st.divider()
-        st.subheader("Final KT Document")
-        st.markdown(st.session_state.final_summary)
-        
-        # Generate PDF if not already in session state
-        if "pdf_bytes" not in st.session_state:
+        st.subheader("📄 Final KT Document")
+
+        # --- Coverage chart above the document ---
+        import pandas as pd
+        topic_names = [t.name for t in st.session_state.session.topics]
+        topic_scores = [t.confidence_score for t in st.session_state.session.topics]
+        chart_df = pd.DataFrame({"Coverage (%)": topic_scores}, index=topic_names)
+        st.caption("**Topic Coverage at Document Generation**")
+        st.bar_chart(chart_df, height=180, color="#4facfe")
+
+        st.divider()
+
+
+        # --- Mermaid-aware document renderer ---
+        def render_document_with_mermaid(markdown_text: str):
+            """
+            Splits the document on mermaid fenced code blocks.
+            Renders text sections with st.markdown and diagrams via Mermaid.js.
+            """
+            import re
+            # Split on ```mermaid ... ``` blocks
+            pattern = r'(```mermaid\n.*?```)'
+            parts = re.split(pattern, markdown_text, flags=re.DOTALL)
+
+            for part in parts:
+                if part.startswith("```mermaid"):
+                    # Extract the diagram definition
+                    diagram_code = part[len("```mermaid\n"):-3].strip()
+                    mermaid_html = f"""
+                    <div style="background:#1e2530; border-radius:10px; padding:1.5rem; margin:1rem 0;">
+                        <div class="mermaid" style="text-align:center;">{diagram_code}</div>
+                    </div>
+                    <script type="module">
+                        import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
+                        mermaid.initialize({{
+                            startOnLoad: true,
+                            theme: 'dark',
+                            themeVariables: {{
+                                primaryColor: '#4facfe',
+                                primaryTextColor: '#e6edf3',
+                                lineColor: '#8892b0',
+                                background: '#1e2530'
+                            }}
+                        }});
+                    </script>
+                    """
+                    st.components.v1.html(mermaid_html, height=400, scrolling=True)
+                elif part.strip():
+                    st.markdown(part)
+
+        render_document_with_mermaid(st.session_state.final_summary)
+
+        # --- PDF & DOCX generation ---
+        if "pdf_bytes" not in st.session_state or "docx_bytes" not in st.session_state:
             from markdown_pdf import MarkdownPdf, Section
             import tempfile
-            
-            try:
-                # Strictly B&W CSS for technical PDF (No gray tones)
-                pdf_css = """
-                body { font-family: 'Helvetica', sans-serif; line-height: 1.6; color: #000; margin: 40px; background-color: #fff; }
-                h1 { color: #000; border-bottom: 2px solid #000; padding-bottom: 10px; font-size: 24px; }
-                h2 { color: #000; margin-top: 25px; border-bottom: 1px solid #000; font-size: 20px; }
-                h3 { color: #000; margin-top: 20px; font-size: 16px; }
-                table { border-collapse: collapse; width: 100%; margin: 20px 0; font-size: 10pt; }
-                th, td { border: 1px solid #000; padding: 8px; text-align: left; background-color: #fff; }
-                th { color: #000; font-weight: bold; border-bottom: 2px solid #000; }
-                tr { background-color: #fff; }
-                code { background-color: #fff; padding: 2px 4px; border: 1px solid #000; border-radius: 4px; font-family: monospace; font-size: 9pt; }
-                pre { background-color: #fff; padding: 15px; border-radius: 5px; overflow-x: auto; border: 1px solid #000; font-size: 9pt; color: #000; }
-                blockquote { border-left: 5px solid #000; padding-left: 15px; margin-left: 0; color: #000; font-style: italic; }
-                """
-                
-                pdf = MarkdownPdf()
-                pdf.add_section(Section(st.session_state.final_summary), user_css=pdf_css)
-                
-                with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
-                    pdf.save(tmp.name)
-                    with open(tmp.name, "rb") as f:
-                        st.session_state.pdf_bytes = f.read()
-                    os.unlink(tmp.name)
-            except Exception as e:
-                logger.error(f"PDF generation failed: {e}")
-                st.error("Failed to generate PDF. You can still copy the text above.")
+            import re
+            import subprocess
+            import base64
+            import json
+            import os
+            import urllib.request
+            import uuid
+            import shutil
 
-        if "pdf_bytes" in st.session_state:
-            st.download_button(
-                label="📥 Download as PDF",
-                data=st.session_state.pdf_bytes,
-                file_name=f"KT_Assistant_Summary_{st.session_state.session_id[:8]}.pdf",
-                mime="application/pdf",
-                use_container_width=True
+            # Shared temp dir for locally-downloaded Mermaid diagram images (used by DOCX/Pandoc)
+            export_tmp_dir = tempfile.mkdtemp()
+
+            MIN_DIAGRAM_BYTES = 3000  # mermaid.ink error thumbnails are < 1KB; real diagrams > 3KB
+
+            def _download_mermaid_image(code: str) -> tuple[bytes, str] | None:
+                """Download a Mermaid diagram from mermaid.ink/img.
+                Returns (image_bytes, mime_type) or None on failure."""
+                state = {"code": code, "mermaid": {"theme": "default"}}
+                b64 = base64.urlsafe_b64encode(json.dumps(state).encode('utf-8')).decode('utf-8')
+                img_url = f"https://mermaid.ink/img/{b64}"
+                try:
+                    req = urllib.request.Request(
+                        img_url,
+                        headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+                    )
+                    with urllib.request.urlopen(req, timeout=15) as resp:
+                        data = resp.read()
+                    # Detect format by magic bytes
+                    if data[:4] == b'\x89PNG':
+                        mime = "image/png"
+                    elif data[:3] == b'\xff\xd8\xff':
+                        # JPEG/JFIF — mermaid.ink returns JPEG by default
+                        mime = "image/jpeg"
+                    else:
+                        logger.warning(f"mermaid.ink returned unexpected format. Code: {code[:80]}")
+                        return None
+                    # Reject tiny error thumbnails — real diagrams are always > 3KB
+                    if len(data) < MIN_DIAGRAM_BYTES:
+                        logger.warning(f"mermaid.ink returned tiny image ({len(data)} bytes), likely a render error. Code: {code[:120]}")
+                        return None
+                    return (data, mime)
+                except Exception as dl_err:
+                    logger.error(f"Mermaid image download failed: {dl_err}")
+                    return None
+
+            def mermaid_to_html_div(match):
+                """For PDF: embed diagram as a mermaid div to be rendered by JS in Playwright."""
+                code = match.group(1).strip()
+                # Wrap in a div that won't be modified by markdown
+                return f'<div class="mermaid" style="text-align:center;">\n{code}\n</div>'
+
+            def mermaid_to_local_file(match):
+                """For DOCX/Pandoc: save image to local temp file and return a path link."""
+                result = _download_mermaid_image(match.group(1).strip())
+                if result:
+                    img_bytes, mime_type = result
+                    ext = "png" if mime_type == "image/png" else "jpg"
+                    local_path = os.path.join(export_tmp_dir, f"mermaid_{uuid.uuid4().hex[:8]}.{ext}")
+                    with open(local_path, 'wb') as out:
+                        out.write(img_bytes)
+                    return f"![Diagram]({local_path})"
+                return "_[Diagram — could not be rendered]_"
+
+            # PDF uses local browser rendering; DOCX uses local file paths
+            pdf_export_markdown = re.sub(
+                r'```mermaid\n(.*?)\n```',
+                mermaid_to_html_div,
+                st.session_state.final_summary,
+                flags=re.DOTALL
+            )
+            docx_export_markdown = re.sub(
+                r'```mermaid\n(.*?)\n```',
+                mermaid_to_local_file,
+                st.session_state.final_summary,
+                flags=re.DOTALL
             )
 
+            # 1. Generate PDF with embedded Mermaid images
+            try:
+                import markdown
+                
+                # Convert markdown to HTML using standard extensions
+                html_body = markdown.markdown(
+                    pdf_export_markdown,
+                    extensions=['tables', 'fenced_code']
+                )
+                
+                # Wrap in clean CSS mimicking GitHub Markdown for perfect web-standard rendering
+                full_html = f"""
+                <!DOCTYPE html>
+                <html>
+                <head>
+                <script type="module">
+                    import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
+                    mermaid.initialize({{
+                        startOnLoad: true,
+                        theme: 'default'
+                    }});
+                </script>
+                <style>
+                body {{ font-family: -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif; line-height: 1.6; color: #24292f; margin: 40px auto; max-width: 900px; padding: 20px; }}
+                h1, h2, h3, h4 {{ border-bottom: 1px solid #d0d7de; padding-bottom: 0.3em; margin-top: 24px; margin-bottom: 16px; font-weight: 600; page-break-after: avoid; }}
+                table {{ border-collapse: collapse; width: 100%; margin: 16px 0; font-size: 14px; page-break-inside: auto; }}
+                tr {{ page-break-inside: avoid; page-break-after: auto; }}
+                thead {{ display: table-header-group; }}
+                th, td {{ border: 1px solid #d0d7de; padding: 8px 13px; text-align: left; }}
+                th {{ font-weight: 600; background-color: #f6f8fa; }}
+                tr:nth-child(2n) {{ background-color: #f6f8fa; }}
+                code {{ background-color: #afb8c133; padding: 0.2em 0.4em; border-radius: 6px; font-family: ui-monospace,SFMono-Regular,SF Mono,Menlo,Consolas,Liberation Mono,monospace; font-size: 85%; }}
+                pre {{ background-color: #f6f8fa; padding: 16px; border-radius: 6px; overflow: auto; page-break-inside: avoid; }}
+                pre code {{ background-color: transparent; padding: 0; }}
+                img {{ max-width: 100%; height: auto; box-sizing: content-box; display: block; margin: 20px auto; page-break-inside: avoid; }}
+                blockquote {{ padding: 0 1em; color: #57606a; border-left: .25em solid #d0d7de; margin: 0; }}
+                </style>
+                </head>
+                <body>
+                {html_body}
+                </body>
+                </html>
+                """
+                
+                with tempfile.NamedTemporaryFile(delete=False, suffix=".html") as tmp_html:
+                    tmp_html.write(full_html.encode('utf-8'))
+                    html_path = tmp_html.name
+                    
+                pdf_path = html_path.replace(".html", ".pdf")
+                
+                # Call Playwright wrapper script to avoid asyncio thread conflicts in Streamlit
+                script_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "scripts", "generate_pdf.py")
+                subprocess.run([sys.executable, script_path, html_path, pdf_path], check=True)
+                
+                with open(pdf_path, "rb") as f:
+                    st.session_state.pdf_bytes = f.read()
+                    
+                os.unlink(html_path)
+                os.unlink(pdf_path)
+            except Exception as e:
+                logger.error(f"PDF generation failed: {e}")
+                st.error(f"Failed to generate PDF: {e}")
+
+            # 2. Generate DOCX (reuse same local images, then Pandoc)
+            try:
+                with tempfile.NamedTemporaryFile(delete=False, suffix=".md") as tmp_md:
+                    tmp_md.write(docx_export_markdown.encode('utf-8'))
+                    md_path = tmp_md.name
+
+                docx_path = md_path + ".docx"
+                
+                # Call pandoc to convert Markdown with remote images into a DOCX
+                process = subprocess.run(
+                    ["pandoc", md_path, "-o", docx_path],
+                    capture_output=True,
+                    text=True
+                )
+
+                if process.returncode == 0:
+                    # Polish tables: full width, even columns, padding, readable font
+                    try:
+                        from docx import Document as DocxDocument
+                        from docx.oxml.ns import qn
+                        from docx.oxml import OxmlElement
+                        from docx.shared import Pt, Twips
+
+                        def set_cell_border(cell):
+                            tc = cell._tc
+                            tcPr = tc.get_or_add_tcPr()
+                            tcBorders = OxmlElement('w:tcBorders')
+                            for edge in ('top', 'left', 'bottom', 'right', 'insideH', 'insideV'):
+                                tag = OxmlElement(f'w:{edge}')
+                                tag.set(qn('w:val'), 'single')
+                                tag.set(qn('w:sz'), '6')
+                                tag.set(qn('w:space'), '0')
+                                tag.set(qn('w:color'), '4A4A4A')
+                                tcBorders.append(tag)
+                            tcPr.append(tcBorders)
+
+                        def set_cell_padding(cell, pad_twips=120):
+                            tc = cell._tc
+                            tcPr = tc.get_or_add_tcPr()
+                            tcMar = OxmlElement('w:tcMar')
+                            for side in ('top', 'left', 'bottom', 'right'):
+                                el = OxmlElement(f'w:{side}')
+                                el.set(qn('w:w'), str(pad_twips))
+                                el.set(qn('w:type'), 'dxa')
+                                tcMar.append(el)
+                            tcPr.append(tcMar)
+
+                        def set_table_full_width(table, col_count):
+                            """Set table to full text-area width and distribute columns evenly."""
+                            tbl = table._tbl
+                            tblPr = tbl.tblPr
+                            # Full width (100%)
+                            tblW = OxmlElement('w:tblW')
+                            tblW.set(qn('w:w'), '5000')
+                            tblW.set(qn('w:type'), 'pct')
+                            tblPr.append(tblW)
+                            # Enable autofit
+                            tblLayout = OxmlElement('w:tblLayout')
+                            tblLayout.set(qn('w:type'), 'autofit')
+                            tblPr.append(tblLayout)
+                            # Even column widths (page text width ≈ 9360 TWIPs for A4)
+                            if col_count > 0:
+                                col_width = 9360 // col_count
+                                for tr in tbl.tr_lst:
+                                    for tc in tr.tc_lst:
+                                        tcPr = tc.get_or_add_tcPr()
+                                        w = OxmlElement('w:tcW')
+                                        w.set(qn('w:w'), str(col_width))
+                                        w.set(qn('w:type'), 'dxa')
+                                        tcPr.append(w)
+
+                        def make_spacer_para(space_before=0, space_after=240):
+                            """Create an empty paragraph with spacing for use around tables."""
+                            p = OxmlElement('w:p')
+                            pPr = OxmlElement('w:pPr')
+                            spacing = OxmlElement('w:spacing')
+                            spacing.set(qn('w:before'), str(space_before))
+                            spacing.set(qn('w:after'), str(space_after))
+                            pPr.append(spacing)
+                            p.append(pPr)
+                            return p
+
+                        doc = DocxDocument(docx_path)
+
+                        # Step 1: Style all tables
+                        for i, table in enumerate(doc.tables):
+                            col_count = max(len(row.cells) for row in table.rows) if table.rows else 0
+                            set_table_full_width(table, col_count)
+                            for row_idx, row in enumerate(table.rows):
+                                for cell in row.cells:
+                                    set_cell_border(cell)
+                                    set_cell_padding(cell, pad_twips=120)
+                                    for para in cell.paragraphs:
+                                        for run in para.runs:
+                                            run.font.size = Pt(10)
+                                            if row_idx == 0:  # Header row bold
+                                                run.bold = True
+
+                        # Step 2: Add spacer paragraphs before and after each table
+                        for table in doc.tables:
+                            tbl = table._tbl
+                            tbl.addprevious(make_spacer_para(space_before=0, space_after=120))
+                            tbl.addnext(make_spacer_para(space_before=120, space_after=240))
+
+                        # Step 3: Global paragraph spacing for all body text
+                        for para in doc.paragraphs:
+                            pPr = para._p.get_or_add_pPr()
+                            spacing = pPr.find(qn('w:spacing'))
+                            if spacing is None:
+                                spacing = OxmlElement('w:spacing')
+                                pPr.append(spacing)
+                            # Don't override heading spacing — only set on Normal paragraphs
+                            if para.style.name.startswith('Heading'):
+                                spacing.set(qn('w:before'), '280')
+                                spacing.set(qn('w:after'), '80')
+                            else:
+                                spacing.set(qn('w:after'), '120')
+
+                        doc.save(docx_path)
+                        logger.info("DOCX table formatting applied successfully.")
+                    except Exception as table_err:
+                        logger.warning(f"Failed to format DOCX tables: {table_err}")
 
 
+                    with open(docx_path, "rb") as f:
+                        st.session_state.docx_bytes = f.read()
+
+                else:
+                    logger.error(f"Pandoc failed: {process.stderr}")
+                    st.error("Failed to generate DOCX file (Pandoc error).")
+
+                # Cleanup
+                if os.path.exists(md_path):
+                    os.unlink(md_path)
+                if os.path.exists(docx_path):
+                    os.unlink(docx_path)
+
+            except Exception as e:
+                logger.error(f"DOCX generation failed: {e}")
+                st.error("Failed to generate DOCX (Pandoc might not be installed).")
+            finally:
+                # Clean up locally-downloaded Mermaid images
+                if os.path.exists(export_tmp_dir):
+                    shutil.rmtree(export_tmp_dir)
+
+        # --- Download Buttons ---
+        col1, col2 = st.columns(2)
+        if "pdf_bytes" in st.session_state:
+            with col1:
+                st.download_button(
+                    label="📥 Download as PDF",
+                    data=st.session_state.pdf_bytes,
+                    file_name=f"KT_Document_{st.session_state.session_id[:8]}.pdf",
+                    mime="application/pdf",
+                    use_container_width=True
+                )
+        if "docx_bytes" in st.session_state:
+            with col2:
+                st.download_button(
+                    label="📥 Download as Word (DOCX)",
+                    data=st.session_state.docx_bytes,
+                    file_name=f"KT_Document_{st.session_state.session_id[:8]}.docx",
+                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    use_container_width=True
+                )

@@ -12,3 +12,6 @@ logs/
 
 # Mac system files
 .DS_Store
+
+# Test files & temporary artifacts
+tests/
