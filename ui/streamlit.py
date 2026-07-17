@@ -2,6 +2,7 @@ import streamlit as st
 import uuid
 import sys
 import os
+os.environ['OBJC_DISABLE_INITIALIZE_FORK_SAFETY'] = 'YES'
 import json
 
 # Add project root to sys.path
@@ -18,6 +19,17 @@ from app.services.doc_processor import extract_text_from_file, chunk_text
 from app.services.github_service import fetch_repo_content
 
 st.set_page_config(page_title="KT Assistant", layout="wide", initial_sidebar_state="expanded")
+
+@st.cache_resource
+def install_playwright():
+    import subprocess
+    try:
+        subprocess.run(["playwright", "install", "chromium"], check=True)
+        logger.info("Playwright chromium browser installed/verified")
+    except Exception as e:
+        logger.error(f"Failed to install playwright browsers: {e}")
+
+install_playwright()
 
 # Hide Streamlit's default "Press Enter to submit form" instructions
 st.markdown("""
