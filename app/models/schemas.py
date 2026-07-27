@@ -38,6 +38,7 @@ class Session(BaseModel):
     topics: List[Topic] = Field(default_factory=list)
     overall_confidence: int = 0
     status: str = "in_progress" # in_progress, completed
+    file_manifest: List[str] = Field(default_factory=list)  # all files ingested into this session
 
 class Message(BaseModel):
     role: str # user, assistant

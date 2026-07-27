@@ -23,7 +23,8 @@ class DBService:
                 "overall_confidence": session.overall_confidence,
                 "status": session.status,
                 "updated_at": session.updated_at.isoformat(),
-                "topics": [t.model_dump(by_alias=True) for t in session.topics]
+                "topics": [t.model_dump(by_alias=True) for t in session.topics],
+                "file_manifest": session.file_manifest,
             }
             # upsert session
             self.supabase.table("sessions").upsert(data).execute()
