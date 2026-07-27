@@ -5,6 +5,23 @@ Import these instead of hardcoding strings in routers.
 """
 
 # ---------------------------------------------------------------------------
+# HTTP Defaults
+# ---------------------------------------------------------------------------
+FRIENDLY_HTTP_MESSAGES = {
+    400: "Invalid request. Please check your input and try again.",
+    401: "Authentication required. Please sign in.",
+    403: "Access denied. You do not have permission to perform this action.",
+    404: "Resource not found.",
+    405: "This action is not supported for this endpoint.",
+    409: "Conflict detected. Please refresh and try again.",
+    422: "Invalid input. Please correct the errors and try again.",
+    429: "Too many requests. Please try again shortly.",
+    500: "Something went wrong on our side. Please try again.",
+    503: "Service temporarily unavailable. Please try again shortly.",
+    504: "Request timed out. Please try again."
+}
+
+# ---------------------------------------------------------------------------
 # Session
 # ---------------------------------------------------------------------------
 SESSION_NOT_FOUND         = "Session '{}' not found."
