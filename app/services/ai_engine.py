@@ -58,40 +58,101 @@ class AIEngine:
     def get_embedding(self, text: str) -> List[float]:
         """
         Generates a vector embedding for the given text using LiteLLM.
+        Retries up to 5 times with exponential backoff on rate limit errors.
         """
-        try:
-            response = litellm.embedding(
-                model=settings.EMBEDDING_MODEL, 
-                input=[text],
-                api_key=settings.GEMINI_API_KEY
-            )
-            return response.data[0]['embedding']
-        except Exception as e:
-            logger.error(f"Embedding error: {e}")
-            return [0.0] * settings.EMBEDDING_DIM # Return empty vector on error
+        import time
+        import re
+        max_retries = 5
+        retry_delay = 5  # seconds
+
+        for attempt in range(max_retries):
+            try:
+                response = litellm.embedding(
+                    model=settings.EMBEDDING_MODEL,
+                    input=[text],
+                    api_key=settings.GEMINI_API_KEY
+                )
+                return response.data[0]['embedding']
+            except litellm.RateLimitError as e:
+                if attempt < max_retries - 1:
+                    # Try to parse suggested retry delay from error message
+                    suggested = re.search(r'retry.*?(\d+(?:\.\d+)?)s', str(e), re.IGNORECASE)
+                    wait = float(suggested.group(1)) if suggested else retry_delay
+                    wait = max(wait, retry_delay)  # at least retry_delay seconds
+                    logger.warning(
+                        f"Embedding rate limited (attempt {attempt + 1}/{max_retries}). "
+                        f"Waiting {wait:.1f}s before retry..."
+                    )
+                    time.sleep(wait)
+                    retry_delay = min(retry_delay * 2, 120)  # cap at 2 minutes
+                else:
+                    logger.error(f"Embedding failed after {max_retries} attempts: {e}")
+                    return [0.0] * settings.EMBEDDING_DIM
+            except Exception as e:
+                logger.error(f"Embedding error: {e}")
+                return [0.0] * settings.EMBEDDING_DIM
+
+        return [0.0] * settings.EMBEDDING_DIM
 
     def get_embeddings_batch(self, texts: List[str]) -> List[List[float]]:
         """
-        Generates embeddings for a list of texts.
-        Falls back to sequential embedding if batch fails.
+        Generates embeddings for a list of texts in sub-batches of max 90 items.
+        Each sub-batch retries with exponential backoff on rate limit errors.
+        Falls back to sequential embedding if a batch ultimately fails.
         """
         if not texts:
             return []
-        try:
-            import time
-            time.sleep(0.3)
-            response = litellm.embedding(
-                model=settings.EMBEDDING_MODEL,
-                input=texts,
-                api_key=settings.GEMINI_API_KEY
-            )
-            return [item['embedding'] for item in response.data]
-        except Exception as e:
-            logger.warning(f"Batch embedding failed ({e}), falling back to sequential...")
-            results = []
-            for text in texts:
-                results.append(self.get_embedding(text))
-            return results
+
+        import time
+        import re
+        BATCH_LIMIT = 90  # Gemini free-tier limit is 100 requests/min
+        all_embeddings = []
+
+        for i in range(0, len(texts), BATCH_LIMIT):
+            sub_batch = texts[i : i + BATCH_LIMIT]
+            max_retries = 5
+            retry_delay = 5
+            batch_ok = False
+
+            for attempt in range(max_retries):
+                try:
+                    # Small inter-batch delay to stay under rate limit
+                    if i > 0 or attempt > 0:
+                        time.sleep(0.5)
+                    response = litellm.embedding(
+                        model=settings.EMBEDDING_MODEL,
+                        input=sub_batch,
+                        api_key=settings.GEMINI_API_KEY
+                    )
+                    all_embeddings.extend([item['embedding'] for item in response.data])
+                    batch_ok = True
+                    break
+                except litellm.RateLimitError as e:
+                    if attempt < max_retries - 1:
+                        suggested = re.search(r'retry.*?(\d+(?:\.\d+)?)s', str(e), re.IGNORECASE)
+                        wait = float(suggested.group(1)) if suggested else retry_delay
+                        wait = max(wait, retry_delay)
+                        logger.warning(
+                            f"Batch embedding rate limited (batch {i // BATCH_LIMIT + 1}, "
+                            f"attempt {attempt + 1}/{max_retries}). Waiting {wait:.1f}s..."
+                        )
+                        time.sleep(wait)
+                        retry_delay = min(retry_delay * 2, 120)
+                    else:
+                        logger.warning(
+                            f"Batch {i // BATCH_LIMIT + 1} failed after {max_retries} attempts. "
+                            f"Falling back to sequential embedding for this batch..."
+                        )
+                except Exception as e:
+                    logger.warning(f"Batch embedding error: {e}. Falling back to sequential for this batch.")
+                    break
+
+            if not batch_ok:
+                # Sequential fallback for this specific sub-batch
+                for text in sub_batch:
+                    all_embeddings.append(self.get_embedding(text))
+
+        return all_embeddings
 
     def classify_intent(self, question: str) -> List[str]:
         """

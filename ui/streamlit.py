@@ -377,7 +377,9 @@ else:
                             process_knowledge(ingest_result.aggregated_text)
                         
                         index_chunks(ingest_result.chunks)
-                        st.session_state.file_manifest = ingest_result.files_fetched
+                        # Persist manifest on the session object — survives tab refresh and Streamlit Cloud restarts
+                        st.session_state.session.file_manifest = ingest_result.files_fetched
+                        db_service.save_session(st.session_state.session)
 
                         st.success(f"✅ Fetched **{len(ingest_result.files_fetched)} files** from `{ingest_result.owner}/{ingest_result.repo}`.")
                         logger.info(f"GitHub repo ingested: {ingest_result.summary}")
@@ -401,9 +403,10 @@ else:
                             file_chunks = chunk_text(text, source_name=uploaded_file.name, chunk_size=settings.CHUNK_SIZE, chunk_overlap=settings.CHUNK_OVERLAP)
                             index_chunks(file_chunks)
 
-                            existing = st.session_state.get("file_manifest", [])
+                            existing = st.session_state.session.file_manifest
                             if uploaded_file.name not in existing:
-                                st.session_state.file_manifest = existing + [uploaded_file.name]
+                                st.session_state.session.file_manifest = existing + [uploaded_file.name]
+                                db_service.save_session(st.session_state.session)
                             
                             st.session_state.last_uploaded_file = uploaded_file.name
                             st.success(f"✅ Processed {uploaded_file.name} for Q&A!")
@@ -449,7 +452,7 @@ else:
                     question=prompt,
                     session=st.session_state.session,
                     session_id=st.session_state.session_id,
-                    file_manifest=st.session_state.get("file_manifest", []),
+                    file_manifest=st.session_state.session.file_manifest,
                     vector_service=vector_service,
                 )
 

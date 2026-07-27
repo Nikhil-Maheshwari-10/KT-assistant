@@ -19,6 +19,8 @@ class Settings(BaseSettings):
     # App Settings
     LOG_LEVEL: str = "INFO"
     KT_CONFIDENCE_THRESHOLD: int = 80
+    CHAT_TIMEOUT_SECONDS: int = 180      # Max seconds for a single chat SSE stream
+    INGEST_TIMEOUT_SECONDS: int = 600    # Max seconds for a full repo ingest (large repos are slow)
     
     # Embedding & RAG Configuration
     EMBEDDING_DIM: int = 3072

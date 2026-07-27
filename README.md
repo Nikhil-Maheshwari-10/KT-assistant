@@ -151,11 +151,32 @@ CREATE TABLE messages (
 ```
 
 ### 5. Running the Application
+
+There are two ways to start the application depending on your use case:
+
+#### Option A — FastAPI Backend (REST + SSE API)
 ```bash
 poetry run python main.py
 ```
+The API will be available at:
+- **API Base** → `http://localhost:8000`
+- **Interactive Docs** → `http://localhost:8000/docs`
 
-The app will be available at `http://localhost:8501`.
+Use this when connecting a custom frontend or using the API directly.
+
+#### Option B — Streamlit UI (Chat Interface)
+```bash
+poetry run streamlit run ui/streamlit.py
+```
+The UI will be available at:
+- **Streamlit App** → `http://localhost:8501`
+
+> **Note:** The Streamlit UI imports the service layer **directly** (not over HTTP), so it runs **independently** — you do NOT need to start the FastAPI backend to use the Streamlit UI. Run only one at a time, or both in separate terminals if you need the REST API alongside the UI.
+
+#### Dev Mode (hot-reload)
+```bash
+uvicorn main:app --reload
+```
 
 ---
 
