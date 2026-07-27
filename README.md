@@ -136,6 +136,7 @@ CREATE TABLE sessions (
     overall_confidence INT DEFAULT 0,
     status TEXT DEFAULT 'active',
     topics JSONB,
+    file_manifest JSONB DEFAULT '[]'::jsonb,
     updated_at TIMESTAMPTZ DEFAULT NOW()
 );
 
