@@ -6,6 +6,7 @@ export default defineConfig({
   plugins: [react()],
   server: {
     host: true, // bind to 0.0.0.0 so it's accessible via LAN IP
+    allowedHosts: true, // allow any host header for Cloudflare tunnels
     proxy: {
       // Forward /api/* and /health to the FastAPI backend
       '/api': {
