@@ -72,13 +72,13 @@ The generated document includes an executive summary, architecture diagrams (Mer
 
 | Layer | Technology |
 | :--- | :--- |
-| **Frontend** | Streamlit |
+| **Frontend** | React (Vite) |
 | **LLM Orchestration** | LiteLLM (Gemini Models via Google AI Studio) |
 | **Session Database** | Supabase (PostgreSQL) |
 | **Vector Database** | Qdrant |
 | **PDF Rendering** | Playwright (headless Chromium) |
 | **DOCX Generation** | Pandoc + python-docx |
-| **Embeddings** | Gemini Embedding Model (3072-dim) |
+| **Embeddings** | FastEmbed (sentence-transformers/all-MiniLM-L6-v2) |
 | **GitHub API** | GitHub REST API v3 (public repos) |
 
 ---
@@ -87,11 +87,11 @@ The generated document includes an executive summary, architecture diagrams (Mer
 
 ### 1. Prerequisites
 - Python 3.11+
-- Poetry
 - Qdrant Cluster (Cloud or Local Docker)
 - Supabase Account
 - Google AI Studio API Key (Gemini)
 - Pandoc installed on your system (`brew install pandoc` on macOS)
+- *(Optional)* Poetry
 
 ### 2. Installation
 ```bash
@@ -99,11 +99,17 @@ The generated document includes an executive summary, architecture diagrams (Mer
 git clone https://github.com/Nikhil-Maheshwari-10/KT-assistant.git
 cd KT-assistant
 
-# 2. Install dependencies (creates a virtual environment automatically)
+# 2. Install dependencies (Using standard pip)
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+
+# OR Install dependencies (Using Poetry - Optional)
 poetry install
 
 # 3. Install Playwright browser
-poetry run playwright install chromium
+playwright install chromium
+# If using Poetry: poetry run playwright install chromium
 ```
 
 ### 3. Environment Setup
@@ -121,10 +127,11 @@ Configure your `.env` file with the following parameters:
 | `QDRANT_URL` | Endpoint for your Qdrant cluster |
 | `QDRANT_API_KEY` | API Key for Qdrant authentication |
 | `QDRANT_COLLECTION` | Name of the Qdrant collection to use |
-| `GEMINI_API_KEY` | Your Google AI Studio API Key |
-| `PRIMARY_MODEL_NAME` | Model for deep analysis & KT document generation |
-| `SECONDARY_MODEL_NAME` | Model for fast chat streaming & intent classification |
-| `EMBEDDING_MODEL` | Model used for generating vector embeddings |
+| `GEMINI_API_KEYS` | Comma-separated Google AI Studio API Keys (supports rotation across multiple keys) |
+| `PRIMARY_MODEL_NAME` | Model for ingestion scoring & final KT document generation |
+| `SECONDARY_MODEL_NAME` | Model for chat Q&A streaming |
+| `TERTIARY_MODEL_NAME` | Model for conversation history summarization & consolidation |
+| `EMBEDDING_MODEL` | Local FastEmbed model for generating vector embeddings |
 
 ### 4. Supabase Schema
 Run the following SQL in your Supabase SQL editor to create the required tables:
@@ -153,10 +160,14 @@ CREATE TABLE messages (
 
 ### 5. Running the Application
 
-There are two ways to start the application depending on your use case:
+There are a few ways to start the application depending on your use case:
 
 #### Option A — FastAPI Backend (REST + SSE API)
 ```bash
+# If using standard pip
+python main.py
+
+# If using Poetry
 poetry run python main.py
 ```
 The API will be available at:
@@ -165,8 +176,20 @@ The API will be available at:
 
 Use this when connecting a custom frontend or using the API directly.
 
-#### Option B — Streamlit UI (Chat Interface)
+#### Option B — React Frontend (Recommended)
 ```bash
+cd fe
+npm install
+npm run dev
+```
+The React UI will be available at `http://localhost:5173`. Requires the FastAPI backend (Option A) to be running.
+
+#### Option C — Streamlit UI (Optional / Legacy)
+```bash
+# If using standard pip
+streamlit run ui/streamlit.py
+
+# If using Poetry
 poetry run streamlit run ui/streamlit.py
 ```
 The UI will be available at:
@@ -195,7 +218,9 @@ uvicorn main:app --reload
 │       ├── db_service.py       # Supabase CRUD (sessions, messages, TTL cleanup)
 │       ├── vector_service.py   # Qdrant: upsert/search chunks & summaries, zombie purge
 │       ├── github_service.py   # GitHub API ingestion: branch listing, file tree, chunking
-│       └── doc_processor.py   # PDF/TXT text extraction for file uploads
+│       └── doc_processor.py    # PDF/TXT text extraction for file uploads
+├── fe/                         # React/Vite Frontend
+│   └── src/                    # Frontend source code
 ├── scripts/
 │   └── generate_pdf.py         # Standalone Playwright PDF renderer (subprocess-safe)
 ├── ui/

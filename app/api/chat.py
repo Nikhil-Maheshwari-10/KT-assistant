@@ -30,6 +30,7 @@ from app.api.deps import get_session_or_404
 from app.services.db_service import db_service
 from app.services.ai_engine import ai_engine
 from app.services.vector_service import vector_service
+from app.services.memory_service import memory_service
 
 router = APIRouter(prefix="/api/sessions/{session_id}/chat", tags=["Chat"])
 
@@ -78,41 +79,87 @@ async def chat(
     question = body.question.strip()
     timeout = settings.CHAT_TIMEOUT_SECONDS
 
-    # Persist user message immediately so it appears in history regardless of outcome
+    # Persist user message immediately so it appears in the chat UI
     db_service.save_message(session_id, Message(role="user", content=question))
 
     # File manifest lives on the session object — no message scan needed
     file_manifest: list[str] = session.file_manifest
 
+    # Stage 1: immediately write a pending memory turn so follow-up questions
+    # can see this one in history even while summarization runs in background.
+    memory_service.store_pending_turn(session_id, question)
+
+    # Stage 2: retrieve Qdrant-based conversation history (compact summaries)
+    # instead of raw Supabase messages — far more token-efficient.
+    recent_history = memory_service.retrieve_history(session_id)
+
     async def _stream() -> AsyncGenerator[str, None]:
+        import queue
+        import threading
+        
+        q = queue.Queue()
+
+        def _worker():
+            try:
+                intents = ai_engine.classify_intent(question)
+                q.put(("intent", intents))
+
+                intents_result, token_gen = ai_engine.route_and_stream(
+                    question=question,
+                    session=session,
+                    session_id=session_id,
+                    file_manifest=file_manifest,
+                    vector_service=vector_service,
+                    intents=intents,
+                    history=recent_history,
+                )
+                q.put(("intents_result", intents_result))
+
+                for token in token_gen:
+                    q.put(("token", token))
+
+                q.put(("done", None))
+            except Exception as exc:
+                logger.error(f"[CHAT] Worker error: {exc}", exc_info=True)
+                q.put(("error", str(exc)))
+
+        thread = threading.Thread(target=_worker)
+        thread.start()
+
         full_parts: list[str] = []
-        error_occurred = False
+        intents_result = []
+        loop = asyncio.get_event_loop()
 
-        try:
-            intents = ai_engine.classify_intent(question)
-            yield _sse({"type": "intent", "intents": intents})
+        while True:
+            # wait for items from the queue without blocking the event loop
+            item = await loop.run_in_executor(None, q.get)
+            msg_type, data = item
 
-            intents_result, token_gen = ai_engine.route_and_stream(
-                question=question,
-                session=session,
-                session_id=session_id,
-                file_manifest=file_manifest,
-                vector_service=vector_service,
-            )
-
-            for token in token_gen:
-                full_parts.append(token)
-                yield _sse({"type": "token", "content": token})
-
-            full_answer = "".join(full_parts)
-            db_service.save_message(session_id, Message(role="assistant", content=full_answer))
-            yield _sse({"type": "done", "full_answer": full_answer, "intents": intents_result, "status": "Success"})
-
-        except Exception as exc:
-            error_occurred = True
-            logger.error(f"[CHAT] SSE error for session {session_id}: {exc}", exc_info=True)
-            yield _sse({"type": "error", "message": str(exc)})
-            yield _sse({"type": "done", "status": "Failed"})
+            if msg_type == "intent":
+                yield _sse({"type": "intent", "intents": data})
+            elif msg_type == "intents_result":
+                intents_result = data
+            elif msg_type == "token":
+                full_parts.append(data)
+                yield _sse({"type": "token", "content": data})
+            elif msg_type == "done":
+                full_answer = "".join(full_parts)
+                db_service.save_message(session_id, Message(role="assistant", content=full_answer))
+                yield _sse({"type": "done", "full_answer": full_answer, "intents": intents_result, "status": "Success"})
+                # Stage 3: summarize the Q&A pair in a background thread so it
+                # doesn't block the SSE stream. The summary is stored in Qdrant
+                # and used as history context for future questions in this session.
+                import threading
+                threading.Thread(
+                    target=memory_service.summarize_and_store,
+                    args=(session_id, question, full_answer, ai_engine),
+                    daemon=True,
+                ).start()
+                break
+            elif msg_type == "error":
+                yield _sse({"type": "error", "message": data})
+                yield _sse({"type": "done", "status": "Failed"})
+                break
 
     async def _stream_with_timeout() -> AsyncGenerator[str, None]:
         """

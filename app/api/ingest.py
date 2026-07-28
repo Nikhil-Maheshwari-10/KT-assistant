@@ -36,7 +36,7 @@ from app.api.deps import get_session_or_404
 from app.services.db_service import db_service
 from app.services.ai_engine import ai_engine
 from app.services.vector_service import vector_service
-from app.services.github_service import fetch_branches, fetch_repo_content, parse_github_url
+from app.services.github_service import fetch_branches, fetch_repo_content, parse_github_url, process_zip_file
 from app.services.doc_processor import extract_text_from_file, chunk_text
 
 router = APIRouter(prefix="/api/sessions/{session_id}/ingest", tags=["Ingest"])
@@ -182,15 +182,16 @@ async def ingest_github(
                 })
 
                 db_service.save_message(session_id, Message(
-                    role="user",
+                    role="assistant",
                     content=(
                         f"🐙 **GitHub Repository Ingested:** `{ingest_result.owner}/{ingest_result.repo}` "
-                        f"(branch: `{ingest_result.branch}`) — "
-                        f"{len(ingest_result.files_fetched)} files, {ingest_result.total_chars / 1024:.1f} KB processed."
+                        f"(branch: `{ingest_result.branch}`)\n\n"
+                        f"I've successfully analyzed the codebase. Feel free to ask me anything about its architecture, flow, or code details!"
                     ),
                 ))
-                # Persist file manifest on the session — single source of truth
-                session.file_manifest = ingest_result.files_fetched
+                # Persist file manifest on the session — single source of truth.
+                # Inject a special tag at the beginning so the UI knows the repo and branch name.
+                session.file_manifest = [f"__REPO__:{ingest_result.repo} ({ingest_result.branch})"] + ingest_result.files_fetched
 
                 all_results = ai_engine.multi_topic_validate_and_score(session, ingest_result.aggregated_text)
                 for topic in session.topics:
@@ -228,6 +229,9 @@ async def ingest_github(
                     "type": "done",
                     "files_fetched": len(ingest_result.files_fetched),
                     "file_manifest": ingest_result.files_fetched,
+                    "owner": ingest_result.owner,
+                    "repo": ingest_result.repo,
+                    "branch": ingest_result.branch,
                     "session": session.model_dump(mode="json"),
                     "status": "Success",
                 })
@@ -262,29 +266,117 @@ async def ingest_github(
 # POST /file
 # ---------------------------------------------------------------------------
 
-@router.post("/file", response_model=Session)
+@router.post("/file")
 async def ingest_file(
     session_id: str,
     file: UploadFile = File(...),
     session: Session = Depends(get_session_or_404),
 ):
-    """Accepts PDF or TXT upload, runs AI analysis, and indexes chunks for Q&A."""
-    if not (file.filename.endswith(".pdf") or file.filename.endswith(".txt")):
+    """Accepts a ZIP archive upload, runs AI analysis, and streams SSE progress."""
+    if not file.filename.endswith(".zip"):
         raise BadRequestException(INGEST_FILE_UNSUPPORTED)
 
-    text = extract_text_from_file(await file.read(), file.filename)
-    if not text:
-        raise UnprocessableException(INGEST_FILE_EMPTY.format(file.filename))
+    # Read zip bytes synchronously into memory
+    zip_bytes = await file.read()
 
-    db_service.save_message(session_id, Message(role="user", content=f"📄 **Uploaded Document:** {file.filename}"))
-    _process_knowledge(session, text)
-    _index_chunks(session_id, chunk_text(
-        text, source_name=file.filename,
-        chunk_size=settings.CHUNK_SIZE, chunk_overlap=settings.CHUNK_OVERLAP,
-    ))
-    # Append filename to session manifest if not already present
-    if file.filename not in session.file_manifest:
-        session.file_manifest.append(file.filename)
-        db_service.save_session(session)
-    logger.info(f"[INGEST] File '{file.filename}' ingested for session {session_id}")
-    return session
+    timeout = settings.INGEST_TIMEOUT_SECONDS
+
+    async def _stream() -> AsyncGenerator[str, None]:
+        if _INGEST_SEMAPHORE._value <= 0:
+            logger.warning(f"[INGEST] Semaphore saturated — rejecting zip upload for session {session_id}")
+            yield _sse({"type": "error", "message": INGEST_SERVICE_BUSY})
+            yield _sse({"type": "done", "status": "Failed"})
+            return
+
+        async with _INGEST_SEMAPHORE:
+            logger.info(f"[INGEST] Semaphore acquired for zip upload session {session_id}")
+            try:
+                yield _sse({"type": "progress", "message": f"Extracting {file.filename}…"})
+
+                ingest_result = process_zip_file(zip_bytes, file.filename)
+                if not ingest_result.success:
+                    yield _sse({"type": "error", "message": INGEST_REPO_ERROR.format(ingest_result.error)})
+                    yield _sse({"type": "done", "status": "Failed"})
+                    return
+
+                yield _sse({
+                    "type": "progress",
+                    "message": f"Extracted {len(ingest_result.files_fetched)} files ({ingest_result.total_chars / 1024:.1f} KB). Running AI analysis…",
+                })
+
+                db_service.save_message(session_id, Message(
+                    role="assistant",
+                    content=(
+                        f"🐙 **ZIP Archive Ingested:** `{ingest_result.repo}`\n\n"
+                        f"I've successfully analyzed the codebase. Feel free to ask me anything about its architecture, flow, or code details!"
+                    ),
+                ))
+
+                session.file_manifest = [f"__REPO__:{ingest_result.repo} (zip)"] + ingest_result.files_fetched
+
+                all_results = ai_engine.multi_topic_validate_and_score(session, ingest_result.aggregated_text)
+                for topic in session.topics:
+                    if topic.id not in all_results:
+                        continue
+                    data = all_results[topic.id]
+                    topic.knowledge = TopicKnowledge(**data.get("knowledge", {}))
+                    topic.confidence_score = data.get("confidence_score", 0)
+                    topic.missing_sections = data.get("missing_sections", [])
+                    yield _sse({
+                        "type": "topic_update",
+                        "topic_id": topic.id,
+                        "topic_name": topic.name,
+                        "score": topic.confidence_score,
+                        "missing_sections": topic.missing_sections,
+                    })
+                    if topic.confidence_score >= settings.KT_CONFIDENCE_THRESHOLD and not topic.is_complete:
+                        topic.is_complete = True
+                        summary_text = json.dumps(topic.knowledge.model_dump(), indent=2)
+                        embedding = ai_engine.get_embedding(f"Topic: {topic.name}\nContent: {summary_text}")
+                        vector_service.upsert_topic_summary(session_id, topic.name, summary_text, embedding)
+                        yield _sse({"type": "progress", "message": f"✅ '{topic.name}' indexed for Q&A."})
+
+                session.overall_confidence = int(
+                    sum(t.confidence_score for t in session.topics) / len(session.topics)
+                )
+                db_service.save_session(session)
+
+                if ingest_result.chunks:
+                    yield _sse({"type": "progress", "message": f"Indexing {len(ingest_result.chunks)} content chunks…"})
+                    _index_chunks(session_id, ingest_result.chunks)
+
+                logger.info(f"[INGEST] ZIP archive ingested: {ingest_result.summary}")
+                yield _sse({
+                    "type": "done",
+                    "files_fetched": len(ingest_result.files_fetched),
+                    "file_manifest": ingest_result.files_fetched,
+                    "owner": ingest_result.owner,
+                    "repo": ingest_result.repo,
+                    "branch": ingest_result.branch,
+                    "session": session.model_dump(mode="json"),
+                    "status": "Success",
+                })
+
+            except Exception as exc:
+                logger.error(f"[INGEST] ZIP SSE error for session {session_id}: {exc}", exc_info=True)
+                yield _sse({"type": "error", "message": str(exc)})
+                yield _sse({"type": "done", "status": "Failed"})
+
+    async def _stream_with_timeout() -> AsyncGenerator[str, None]:
+        gen = _stream()
+        try:
+            while True:
+                try:
+                    chunk = await asyncio.wait_for(gen.__anext__(), timeout=timeout)
+                    yield chunk
+                except StopAsyncIteration:
+                    break
+                except asyncio.TimeoutError:
+                    logger.error(f"[INGEST] Stream timed out after {timeout}s for session {session_id}")
+                    yield _sse({"type": "error", "message": CHAT_TIMEOUT.format(timeout)})
+                    yield _sse({"type": "done", "status": "Failed"})
+                    break
+        finally:
+            await gen.aclose()
+
+    return StreamingResponse(_stream_with_timeout(), media_type="text/event-stream", headers=_SSE_HEADERS)

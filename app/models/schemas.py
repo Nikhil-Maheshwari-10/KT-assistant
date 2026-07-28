@@ -39,6 +39,7 @@ class Session(BaseModel):
     overall_confidence: int = 0
     status: str = "in_progress" # in_progress, completed
     file_manifest: List[str] = Field(default_factory=list)  # all files ingested into this session
+    user_id: Optional[str] = None  # Browser-local user identity for session isolation
 
 class Message(BaseModel):
     role: str # user, assistant

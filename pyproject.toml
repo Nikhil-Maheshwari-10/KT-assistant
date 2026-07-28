@@ -6,7 +6,7 @@ authors = ["Nikhil Maheshwari <[nikhilmaheshwariii10@gmail.com]>"]
 readme = "README.md"
 
 [tool.poetry.dependencies]
-python = "^3.11"
+python = ">=3.11,<3.13"
 streamlit = "^1.31.0"
 litellm = "^1.28.0"
 supabase = "^2.3.0"
@@ -23,6 +23,7 @@ requests = "^2.31.0"
 fastapi = "^0.115.0"
 uvicorn = {extras = ["standard"], version = "^0.30.0"}
 python-multipart = "^0.0.9"
+fastembed = "0.8.0"
 
 [build-system]
 requires = ["poetry-core"]

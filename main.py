@@ -35,6 +35,10 @@ async def lifespan(app: FastAPI):
         expired_ids = db_service.cleanup_expired_sessions(hours=6)
         active_ids = db_service.get_all_active_session_ids()
         zombie_count = vector_service.purge_zombie_vectors(active_ids)
+        
+        # Ensure memory collection exists
+        vector_service.ensure_memory_collection()
+        
         logger.info(
             f"Startup cleanup: {len(expired_ids)} expired sessions removed, "
             f"{zombie_count} zombie vectors purged."

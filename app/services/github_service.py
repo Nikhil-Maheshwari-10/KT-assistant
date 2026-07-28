@@ -7,27 +7,18 @@ them into a single text blob suitable for feeding into process_knowledge().
 
 import re
 import requests
+import zipfile
+import io
 from typing import Optional
 from dataclasses import dataclass, field
+from app.core.config import settings
 from app.core.logger import logger
 from app.services.doc_processor import chunk_text
 
 
 # ---------------------------------------------------------------------------
-# Configuration
+# Configuration (sourced from settings / .env — see app/core/config.py)
 # ---------------------------------------------------------------------------
-
-# Max total characters we'll send to the LLM (≈ 500 KB — stress testing token limit)
-MAX_TOTAL_CHARS = 500_000
-
-# Max individual file size to fetch (bytes)
-MAX_FILE_BYTES = 60_000
-
-# Max number of files to fetch
-MAX_FILES = 200
-
-# Max total chunks to index into Qdrant (keeps embedding calls practical)
-MAX_CHUNKS = 150
 
 # GitHub API base
 GITHUB_API = "https://api.github.com"
@@ -227,9 +218,9 @@ def _fetch_raw_file(owner: str, repo: str, branch: str, path: str, token: Option
         resp = requests.get(url, headers=headers, timeout=10)
         resp.raise_for_status()
         content = resp.text
-        if len(content.encode("utf-8")) > MAX_FILE_BYTES:
+        if len(content.encode("utf-8")) > settings.MAX_FILE_BYTES:
             # Truncate to avoid token blowout
-            content = content[: MAX_FILE_BYTES] + "\n\n[... file truncated for length ...]"
+            content = content[: settings.MAX_FILE_BYTES] + "\n\n[... file truncated for length ...]"
         return content
     except Exception as e:
         logger.warning(f"Failed to fetch {path}: {e}")
@@ -304,13 +295,13 @@ def fetch_repo_content(github_url: str, token: Optional[str] = None) -> GitHubIn
     logger.info(f"Total files to scan: {len(scored)} (after skip-pattern filtering)")
 
     for priority, size, path in scored:
-        if len(result.files_fetched) >= MAX_FILES:
+        if len(result.files_fetched) >= settings.MAX_FILES:
             skipped_budget += 1
-            logger.info(f"Reached max file limit ({MAX_FILES}). Remaining skipped: {len(scored) - len(result.files_fetched) - skipped_budget + 1}")
+            logger.info(f"Reached max file limit ({settings.MAX_FILES}). Remaining skipped: {len(scored) - len(result.files_fetched) - skipped_budget + 1}")
             break
-        if total_chars >= MAX_TOTAL_CHARS:
+        if total_chars >= settings.MAX_TOTAL_CHARS:
             skipped_budget += 1
-            logger.info(f"Reached character budget ({MAX_TOTAL_CHARS:,} chars / {MAX_TOTAL_CHARS/1024:.0f} KB). Stopping fetch.")
+            logger.info(f"Reached character budget ({settings.MAX_TOTAL_CHARS:,} chars / {settings.MAX_TOTAL_CHARS/1024:.0f} KB). Stopping fetch.")
             break
 
         content = _fetch_raw_file(owner, repo, branch, path, token)
@@ -325,9 +316,9 @@ def fetch_repo_content(github_url: str, token: Optional[str] = None) -> GitHubIn
         logger.info(f"  [{len(result.files_fetched):>3}] Fetched: {path} ({len(content):,} chars)")
 
         # Chunk this file's content for Qdrant RAG indexing
-        if len(result.chunks) < MAX_CHUNKS:
+        if len(result.chunks) < settings.MAX_CHUNKS:
             file_chunks = chunk_text(content, source_name=path)
-            remaining = MAX_CHUNKS - len(result.chunks)
+            remaining = settings.MAX_CHUNKS - len(result.chunks)
             result.chunks.extend(file_chunks[:remaining])
 
     if not sections:
@@ -345,4 +336,93 @@ def fetch_repo_content(github_url: str, token: Optional[str] = None) -> GitHubIn
     result.aggregated_text = preamble + "".join(sections)
     result.total_chars = total_chars
     logger.info(f"GitHub ingestion complete: {result.summary}")
+    return result
+
+def process_zip_file(zip_bytes: bytes, filename: str) -> GitHubIngestResult:
+    result = GitHubIngestResult(owner="local", repo=filename, branch="zip")
+    
+    try:
+        with zipfile.ZipFile(io.BytesIO(zip_bytes)) as z:
+            file_list = z.namelist()
+            scored = []
+            for path in file_list:
+                # Skip directories
+                if path.endswith('/'):
+                    continue
+                
+                size = z.getinfo(path).file_size
+                priority = _get_priority(path)
+                if priority > 0:
+                    scored.append((priority, size, path))
+            
+            # Sort: highest priority first, then smallest size
+            scored.sort(key=lambda x: (-x[0], x[1]))
+            
+            sections = []
+            total_chars = 0
+            skipped_budget = 0
+            
+            logger.info(f"Total files in ZIP to scan: {len(scored)}")
+            
+            for priority, size, path in scored:
+                if len(result.files_fetched) >= settings.MAX_FILES:
+                    skipped_budget += 1
+                    break
+                if total_chars >= settings.MAX_TOTAL_CHARS:
+                    skipped_budget += 1
+                    break
+                    
+                # Read content
+                try:
+                    raw_bytes = z.read(path)
+                    # Try to decode as utf-8, fallback to latin-1
+                    try:
+                        content = raw_bytes.decode('utf-8')
+                    except UnicodeDecodeError:
+                        content = raw_bytes.decode('latin-1')
+                        
+                    # Basic binary check on content
+                    if '\0' in content:
+                        continue
+                        
+                except Exception as e:
+                    logger.warning(f"Failed to read {path} from zip: {e}")
+                    continue
+                    
+                if not content.strip():
+                    continue
+
+                header = f"\n\n{'='*60}\n📄 FILE: {path}\n{'='*60}\n"
+                section = header + content
+                sections.append(section)
+                result.files_fetched.append(path)
+                total_chars += len(section)
+                logger.info(f"  [{len(result.files_fetched):>3}] Extracted: {path} ({len(content):,} chars)")
+                
+                # Chunk this file's content
+                if len(result.chunks) < settings.MAX_CHUNKS:
+                    file_chunks = chunk_text(content, source_name=path)
+                    remaining = settings.MAX_CHUNKS - len(result.chunks)
+                    result.chunks.extend(file_chunks[:remaining])
+            
+            if not sections:
+                result.error = "No relevant text files could be extracted from this ZIP archive."
+                return result
+                
+            preamble = (
+                f"# ZIP Archive: {filename}\n\n"
+                f"The following content was automatically extracted from the uploaded archive "
+                f"to assist with Knowledge Transfer documentation.\n"
+                f"Files included: {', '.join(result.files_fetched)}\n"
+            )
+            
+            result.aggregated_text = preamble + "".join(sections)
+            result.total_chars = total_chars
+            logger.info(f"ZIP ingestion complete: {result.summary}")
+            
+    except zipfile.BadZipFile:
+        result.error = "The uploaded file is not a valid ZIP archive."
+    except Exception as e:
+        result.error = f"Error processing ZIP archive: {str(e)}"
+        
     return result
