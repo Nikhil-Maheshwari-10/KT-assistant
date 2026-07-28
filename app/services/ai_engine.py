@@ -1,4 +1,6 @@
 import litellm
+from litellm import Router
+from fastembed import TextEmbedding
 from app.core.config import settings
 from app.core.logger import logger
 from app.models.schemas import Session, Topic, TopicKnowledge
@@ -9,6 +11,33 @@ class AIEngine:
     def __init__(self):
         self.primary_model = settings.PRIMARY_MODEL_NAME
         self.secondary_model = settings.SECONDARY_MODEL_NAME
+        self.tertiary_model = settings.TERTIARY_MODEL_NAME
+
+        # Initialize LiteLLM Router for API Key rotation
+        api_keys = [k.strip() for k in settings.GEMINI_API_KEYS.split(",") if k.strip()]
+        model_list = []
+        for key in api_keys:
+            model_list.extend([
+                {"model_name": self.primary_model, "litellm_params": {"model": self.primary_model, "api_key": key}},
+                {"model_name": self.secondary_model, "litellm_params": {"model": self.secondary_model, "api_key": key}},
+                {"model_name": self.tertiary_model, "litellm_params": {"model": self.tertiary_model, "api_key": key}}
+            ])
+        
+        # If no keys provided in .env, fallback to empty to avoid crashing on startup (will fail on generation though)
+        if not model_list:
+            logger.warning("No GEMINI_API_KEYS found in .env! Generation will fail.")
+            
+        self.router = Router(
+            model_list=model_list, 
+            num_retries=2,              # Will automatically retry a different key on failure
+            allowed_fails=1             # Number of times a key can fail before being temporarily cooled down
+        )
+
+        logger.info(f"Loading embedding model ({settings.EMBEDDING_MODEL}) via FastEmbed...")
+        self.embedding_model = TextEmbedding(
+            model_name=settings.EMBEDDING_MODEL, 
+            cache_dir=settings.EMBEDDING_CACHE_DIR
+        )
 
     def get_completion(self, messages: List[Dict], response_format: Optional[Dict] = None, model: Optional[str] = None, call_delay: float = 0.5) -> Optional[str]:
         target_model = model or self.primary_model
@@ -21,21 +50,37 @@ class AIEngine:
                 # Protective delay to respect RPM — reduced for lightweight calls
                 time.sleep(call_delay)
                 
-                response = litellm.completion(
+                response = self.router.completion(
                     model=target_model,
                     messages=messages,
                     response_format=response_format,
-                    api_key=settings.GEMINI_API_KEY
+                    # api_key parameter is now handled internally by self.router
                 )
                 
-                # Log usage
+                # Log usage and API key used
                 usage = getattr(response, 'usage', None)
+                used_key_str = ""
+                
+                if hasattr(response, '_hidden_params') and isinstance(response._hidden_params, dict):
+                    used_key = response._hidden_params.get("api_key")
+                    if used_key:
+                        api_keys = [k.strip() for k in settings.GEMINI_API_KEYS.split(",") if k.strip()]
+                        try:
+                            idx = api_keys.index(used_key) + 1
+                            suffix = "th"
+                            if idx == 1: suffix = "st"
+                            elif idx == 2: suffix = "nd"
+                            elif idx == 3: suffix = "rd"
+                            used_key_str = f" [Key: {idx}{suffix}]"
+                        except ValueError:
+                            pass
+
                 if usage:
                     prompt_tokens = getattr(usage, 'prompt_tokens', 0)
                     completion_tokens = getattr(usage, 'completion_tokens', 0)
                     total_tokens = getattr(usage, 'total_tokens', 0)
                     logger.info(
-                        f"LLM Call Success: {target_model} | "
+                        f"LLM Call Success: {target_model}{used_key_str} | "
                         f"Input: {prompt_tokens} | Output: {completion_tokens} | Total: {total_tokens}"
                     )
 
@@ -56,103 +101,23 @@ class AIEngine:
         return None
 
     def get_embedding(self, text: str) -> List[float]:
-        """
-        Generates a vector embedding for the given text using LiteLLM.
-        Retries up to 5 times with exponential backoff on rate limit errors.
-        """
-        import time
-        import re
-        max_retries = 5
-        retry_delay = 5  # seconds
-
-        for attempt in range(max_retries):
-            try:
-                response = litellm.embedding(
-                    model=settings.EMBEDDING_MODEL,
-                    input=[text],
-                    api_key=settings.GEMINI_API_KEY
-                )
-                return response.data[0]['embedding']
-            except litellm.RateLimitError as e:
-                if attempt < max_retries - 1:
-                    # Try to parse suggested retry delay from error message
-                    suggested = re.search(r'retry.*?(\d+(?:\.\d+)?)s', str(e), re.IGNORECASE)
-                    wait = float(suggested.group(1)) if suggested else retry_delay
-                    wait = max(wait, retry_delay)  # at least retry_delay seconds
-                    logger.warning(
-                        f"Embedding rate limited (attempt {attempt + 1}/{max_retries}). "
-                        f"Waiting {wait:.1f}s before retry..."
-                    )
-                    time.sleep(wait)
-                    retry_delay = min(retry_delay * 2, 120)  # cap at 2 minutes
-                else:
-                    logger.error(f"Embedding failed after {max_retries} attempts: {e}")
-                    return [0.0] * settings.EMBEDDING_DIM
-            except Exception as e:
-                logger.error(f"Embedding error: {e}")
-                return [0.0] * settings.EMBEDDING_DIM
-
-        return [0.0] * settings.EMBEDDING_DIM
+        if not text:
+            return [0.0] * settings.EMBEDDING_DIM
+        try:
+            return list(self.embedding_model.embed([text]))[0].tolist()
+        except Exception as e:
+            logger.error(f"Embedding error: {e}")
+            return [0.0] * settings.EMBEDDING_DIM
 
     def get_embeddings_batch(self, texts: List[str]) -> List[List[float]]:
-        """
-        Generates embeddings for a list of texts in sub-batches of max 90 items.
-        Each sub-batch retries with exponential backoff on rate limit errors.
-        Falls back to sequential embedding if a batch ultimately fails.
-        """
         if not texts:
             return []
-
-        import time
-        import re
-        BATCH_LIMIT = 90  # Gemini free-tier limit is 100 requests/min
-        all_embeddings = []
-
-        for i in range(0, len(texts), BATCH_LIMIT):
-            sub_batch = texts[i : i + BATCH_LIMIT]
-            max_retries = 5
-            retry_delay = 5
-            batch_ok = False
-
-            for attempt in range(max_retries):
-                try:
-                    # Small inter-batch delay to stay under rate limit
-                    if i > 0 or attempt > 0:
-                        time.sleep(0.5)
-                    response = litellm.embedding(
-                        model=settings.EMBEDDING_MODEL,
-                        input=sub_batch,
-                        api_key=settings.GEMINI_API_KEY
-                    )
-                    all_embeddings.extend([item['embedding'] for item in response.data])
-                    batch_ok = True
-                    break
-                except litellm.RateLimitError as e:
-                    if attempt < max_retries - 1:
-                        suggested = re.search(r'retry.*?(\d+(?:\.\d+)?)s', str(e), re.IGNORECASE)
-                        wait = float(suggested.group(1)) if suggested else retry_delay
-                        wait = max(wait, retry_delay)
-                        logger.warning(
-                            f"Batch embedding rate limited (batch {i // BATCH_LIMIT + 1}, "
-                            f"attempt {attempt + 1}/{max_retries}). Waiting {wait:.1f}s..."
-                        )
-                        time.sleep(wait)
-                        retry_delay = min(retry_delay * 2, 120)
-                    else:
-                        logger.warning(
-                            f"Batch {i // BATCH_LIMIT + 1} failed after {max_retries} attempts. "
-                            f"Falling back to sequential embedding for this batch..."
-                        )
-                except Exception as e:
-                    logger.warning(f"Batch embedding error: {e}. Falling back to sequential for this batch.")
-                    break
-
-            if not batch_ok:
-                # Sequential fallback for this specific sub-batch
-                for text in sub_batch:
-                    all_embeddings.append(self.get_embedding(text))
-
-        return all_embeddings
+        try:
+            embeddings = list(self.embedding_model.embed(texts))
+            return [emb.tolist() for emb in embeddings]
+        except Exception as e:
+            logger.error(f"Batch embedding error: {e}")
+            return [[0.0] * settings.EMBEDDING_DIM for _ in texts]
 
     def classify_intent(self, question: str) -> List[str]:
         """
@@ -160,17 +125,19 @@ class AIEngine:
         Uses a reduced call_delay (0.1s) since the prompt is tiny and cheap.
 
         Intents:
-          STRUCTURAL  — file lists, folder structure, what files exist
-          CONTENT     — specific code, logic, config values, function details
-          OPERATIONAL — deployment, setup, env vars, how to run
-          BROAD       — general overview, architecture summary
+          STRUCTURAL   — file lists, folder structure, what files exist
+          CONTENT      — specific code, logic, config values, function details
+          ARCHITECTURE — system design, component relationships, data flow, design patterns
+          OPERATIONAL  — deployment, setup, env vars, how to run
+          BROAD        — general overview, quality assessment, flaws, comparisons, opinions
         """
         prompt = f"""Classify this technical question into one or more categories (return as comma-separated list):
 
 - STRUCTURAL: asks about files, folders, project structure, what files exist, directory layout
 - CONTENT: asks about specific code logic, implementation details, configuration values, function behavior
-- OPERATIONAL: asks about deployment, running the app, environment setup, installation, how-to steps
-- BROAD: asks for a general overview, architecture explanation, or summary of the whole system
+- ARCHITECTURE: asks about system design, how components connect, data flow, design patterns, tech stack choices
+- OPERATIONAL: asks about deployment, running the app, environment setup, installation, docker, CI/CD, how-to steps
+- BROAD: asks for a general overview, quality assessment, flaws/weaknesses, best practices, opinions about the system
 
 Question: "{question}"
 
@@ -185,7 +152,7 @@ Return ONLY the category name(s) separated by commas. Examples: "CONTENT" or "ST
         if not response:
             return ["CONTENT"]
 
-        valid = {"STRUCTURAL", "CONTENT", "OPERATIONAL", "BROAD"}
+        valid = {"STRUCTURAL", "CONTENT", "ARCHITECTURE", "OPERATIONAL", "BROAD"}
         intents = [i.strip().upper() for i in response.split(",")]
         result = [i for i in intents if i in valid]
         logger.info(f"Intent classified: {result} for question: '{question[:60]}'")
@@ -195,44 +162,94 @@ Return ONLY the category name(s) separated by commas. Examples: "CONTENT" or "ST
         """
         Builds the context string for Q&A based on classified intents.
         Returns (context_parts: List[str], final_intents: List[str])
+
+        Fix 1 (CONTENT):      Uses score_threshold=0.4 for dynamic relevance instead of fixed top-5.
+        Fix 2 (ARCHITECTURE): New dedicated handler pulling architecture topic + vector search.
+        Fix 3 (OPERATIONAL):  Combines ops summary with a supplemental vector search for config files.
+        Fix 4 (BROAD):        Combines all topic summaries with a supplemental vector search.
         """
         context_parts = []
 
         if "STRUCTURAL" in intents:
             if file_manifest:
-                file_list = "\n".join(f"  - {f}" for f in file_manifest)
-                context_parts.append(f"## Project File Structure ({len(file_manifest)} files)\n{file_list}")
+                # Filter out the internal __REPO__ tag before showing files
+                visible_files = [f for f in file_manifest if not f.startswith('__REPO__:')]
+                file_list = "\n".join(f"  - {f}" for f in visible_files)
+                context_parts.append(f"## Project File Structure ({len(visible_files)} files)\n{file_list}")
             else:
                 context_parts.append("## Project File Structure\n(No file manifest available yet.)")
 
         if "CONTENT" in intents:
+            # Use a permissive score_threshold so short/vague questions still get results.
             query_embedding = self.get_embedding(question)
-            chunks = vector_service.search_chunks(session_id, query_embedding, limit=5)
+            chunks = vector_service.search_chunks(session_id, query_embedding, limit=settings.RAG_CONTEXT_SIZE, score_threshold=0.2)
             if chunks:
                 chunk_context = "\n\n---\n\n".join(
                     f"[{c.get('file_path', 'unknown')}]\n{c.get('content', '')}" for c in chunks
                 )
                 context_parts.append(f"## Relevant Code & File Content\n{chunk_context}")
 
+        if "ARCHITECTURE" in intents:
+            # FIX 2: Brand new dedicated handler for architecture questions.
+            # Pulls both the structured architecture topic summary AND does a vector search
+            # for design patterns and component-level code.
+            arch_topic = next((t for t in session.topics if any(
+                kw in t.name for kw in ["Architecture", "System", "Design", "Overview"]
+            )), None)
+            if arch_topic and arch_topic.knowledge:
+                context_parts.append(
+                    f"## System Architecture Knowledge\n"
+                    f"{arch_topic.knowledge.model_dump_json(by_alias=True)}"
+                )
+            # Supplemental vector search for architecture-level code evidence
+            query_embedding = self.get_embedding(question)
+            arch_chunks = vector_service.search_chunks(session_id, query_embedding, limit=settings.RAG_CONTEXT_SIZE, score_threshold=0.2)
+            if arch_chunks:
+                arch_chunk_context = "\n\n---\n\n".join(
+                    f"[{c.get('file_path', 'unknown')}]\n{c.get('content', '')}" for c in arch_chunks
+                )
+                context_parts.append(f"## Architecture Evidence (Source Code)\n{arch_chunk_context}")
+
         if "OPERATIONAL" in intents:
+            # FIX 3: Combine the ops topic summary with a supplemental vector search
+            # targeting actual config/deployment files (docker, Makefile, CI/CD, env).
             ops_topic = next((t for t in session.topics if "Operation" in t.name), None)
             if ops_topic and ops_topic.knowledge:
                 context_parts.append(
                     f"## Operations & Reliability Knowledge\n"
                     f"{ops_topic.knowledge.model_dump_json(by_alias=True)}"
                 )
+            # Supplemental search for actual raw deployment artifacts
+            ops_embedding = self.get_embedding(question + " deploy docker setup environment installation")
+            ops_chunks = vector_service.search_chunks(session_id, ops_embedding, limit=settings.RAG_CONTEXT_SIZE, score_threshold=0.15)
+            if ops_chunks:
+                ops_chunk_context = "\n\n---\n\n".join(
+                    f"[{c.get('file_path', 'unknown')}]\n{c.get('content', '')}" for c in ops_chunks
+                )
+                context_parts.append(f"## Operational Config & Script Files\n{ops_chunk_context}")
 
         if "BROAD" in intents:
+            # FIX 4: Combine all topic summaries with a supplemental vector search.
+            # This ensures BROAD queries (e.g. "flaws", "weaknesses") also retrieve
+            # supporting evidence from raw code (TODO comments, error handling gaps, etc.)
             all_topics = "\n".join(
                 f"### {t.name}\n{t.knowledge.model_dump_json(by_alias=True)}" for t in session.topics
             )
             context_parts.append(f"## Full System Knowledge\n{all_topics}")
-
-        # Fallback to CONTENT if nothing collected
-        if not context_parts:
-            logger.warning("No context gathered — falling back to CONTENT chunk search.")
+            # Supplemental vector search to find supporting raw-code evidence
             query_embedding = self.get_embedding(question)
-            chunks = vector_service.search_chunks(session_id, query_embedding, limit=5)
+            broad_chunks = vector_service.search_chunks(session_id, query_embedding, limit=settings.RAG_CONTEXT_SIZE, score_threshold=0.15)
+            if broad_chunks:
+                broad_chunk_context = "\n\n---\n\n".join(
+                    f"[{c.get('file_path', 'unknown')}]\n{c.get('content', '')}" for c in broad_chunks
+                )
+                context_parts.append(f"## Supporting Code Evidence\n{broad_chunk_context}")
+
+        # Fallback: no score threshold — always return the top results to guarantee context.
+        if not context_parts:
+            logger.warning("No context gathered — falling back to CONTENT chunk search (no threshold).")
+            query_embedding = self.get_embedding(question)
+            chunks = vector_service.search_chunks(session_id, query_embedding, limit=settings.RAG_CONTEXT_SIZE)
             if chunks:
                 chunk_context = "\n\n---\n\n".join(
                     f"[{c.get('file_path', 'unknown')}]\n{c.get('content', '')}" for c in chunks
@@ -249,6 +266,8 @@ Return ONLY the category name(s) separated by commas. Examples: "CONTENT" or "ST
         session_id: str,
         file_manifest: List[str],
         vector_service,
+        intents: List[str] = None,
+        history: List[dict] = None,
     ) -> tuple:
         """
         Routes the question to the correct data source(s) based on classified intent,
@@ -256,10 +275,12 @@ Return ONLY the category name(s) separated by commas. Examples: "CONTENT" or "ST
         Returns: (intents: List[str], token_generator)
 
         The token_generator is a Python generator that yields str tokens.
-        Use with st.write_stream() in Streamlit.
+        Accepts pre-classified intents to avoid a duplicate LLM call.
+        Accepts conversation history to resolve pronouns like 'that file', 'it', etc.
         """
         import time
-        intents = self.classify_intent(question)
+        if intents is None:
+            intents = self.classify_intent(question)
         context_parts, intents = self._build_context(question, intents, session, session_id, file_manifest, vector_service)
 
         if not context_parts:
@@ -269,33 +290,55 @@ Return ONLY the category name(s) separated by commas. Examples: "CONTENT" or "ST
 
         full_context = "\n\n".join(context_parts)
         system_prompt = f"""You are a technical Q&A assistant for a software project.
-Answer the user's question using ONLY the provided context below.
+You have access to two sources of information:
+1. **Context**: Code snippets and file contents retrieved from the codebase.
+2. **Conversation History**: Your previous messages with the user.
+
+Answer the user's question using the Context and Conversation History.
 Be specific and concise. Reference file names or sections where helpful.
 If an answer spans multiple sources, explain each clearly.
-If the answer is not in the context, say: "This specific detail is not available in the uploaded content."
+If the answer cannot be found in the Context or Conversation History, say: "This specific detail is not available in the uploaded content."
 
+## Context
 {full_context}"""
 
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": question},
-        ]
+        # Build the messages list with full conversation history so the LLM can
+        # resolve pronouns and follow-up references (e.g. 'that file', 'explain it').
+        messages = [{"role": "system", "content": system_prompt}]
+        if history:
+            for msg in history:
+                role = msg.get("role", "user")
+                content = msg.get("content", "")
+                if role in ("user", "assistant") and content:
+                    messages.append({"role": role, "content": content})
+        messages.append({"role": "user", "content": question})
 
         def _token_stream():
             try:
-                response = litellm.completion(
+                response = self.router.completion(
                     model=self.secondary_model,
                     messages=messages,
-                    api_key=settings.GEMINI_API_KEY,
                     stream=True,
                 )
                 for chunk in response:
                     token = chunk.choices[0].delta.content
                     if token:
                         yield token
+            except litellm.RateLimitError as e:
+                import re
+                import time
+                logger.error(f"All API keys rate limited: {e}")
+                
+                # Extract suggested retry delay for logging purposes
+                suggested = re.search(r'retry.*?(\d+(?:\.\d+)?)s', str(e), re.IGNORECASE)
+                if suggested:
+                    wait_time = min(int(float(suggested.group(1))) + 1, 90)
+                    logger.warning(f"All API keys exhausted. Google suggests waiting {wait_time}s.")
+                
+                yield "\n\n_(Chat is currently busy. Please try again after some time.)_"
             except Exception as e:
                 logger.error(f"Streaming error: {e}")
-                yield "\n\n_(Error generating response — please try again.)_"
+                yield "\n\n_(Error generating response. Please try again later.)_"
 
         return intents, _token_stream()
 

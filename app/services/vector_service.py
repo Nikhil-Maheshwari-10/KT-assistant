@@ -55,6 +55,67 @@ class VectorService:
         except Exception as e:
             logger.error(f"Error ensuring Qdrant collection or index: {e}")
 
+    def ensure_memory_collection(self):
+        """
+        Creates the dedicated conversation memory collection if it doesn't exist.
+        Uses a 1-dimension dummy vector since memory is payload-based, not vector-search-based.
+        Each session gets ONE point whose payload contains all its conversation summaries.
+        """
+        if not self.client:
+            return
+        try:
+            collections = self.client.get_collections().collections
+            exists = any(c.name == settings.MEMORY_COLLECTION for c in collections)
+            if not exists:
+                self.client.create_collection(
+                    collection_name=settings.MEMORY_COLLECTION,
+                    vectors_config=models.VectorParams(size=1, distance=models.Distance.COSINE)
+                )
+                logger.info(f"Created memory collection: {settings.MEMORY_COLLECTION}")
+        except Exception as e:
+            logger.error(f"Error ensuring memory collection: {e}")
+
+    def upsert_memory_point(self, point_id: str, payload: dict) -> None:
+        """Upsert the conversation memory payload for a session (one point per session)."""
+        if not self.client:
+            return
+        try:
+            self.client.upsert(
+                collection_name=settings.MEMORY_COLLECTION,
+                points=[models.PointStruct(id=point_id, vector=[1.0], payload=payload)]
+            )
+        except Exception as e:
+            logger.error(f"Error upserting memory point {point_id}: {e}")
+
+    def get_memory_point(self, point_id: str) -> dict:
+        """Retrieve the conversation memory payload for a session."""
+        if not self.client:
+            return {}
+        try:
+            results = self.client.retrieve(
+                collection_name=settings.MEMORY_COLLECTION,
+                ids=[point_id],
+                with_payload=True,
+            )
+            if results:
+                return results[0].payload or {}
+            return {}
+        except Exception as e:
+            logger.error(f"Error retrieving memory point {point_id}: {e}")
+            return {}
+
+    def delete_memory_point(self, point_id: str) -> None:
+        """Delete conversation memory for a session."""
+        if not self.client:
+            return
+        try:
+            self.client.delete(
+                collection_name=settings.MEMORY_COLLECTION,
+                points_selector=models.PointIdsList(points=[point_id])
+            )
+        except Exception as e:
+            logger.error(f"Error deleting memory point {point_id}: {e}")
+
     def upsert_topic_summary(self, session_id: str, topic_name: str, summary: str, embedding: List[float]):
         if not self.client:
             return
@@ -122,10 +183,16 @@ class VectorService:
         except Exception as e:
             logger.error(f"Error upserting content chunks to Qdrant: {e}")
 
-    def search_chunks(self, session_id: str, query_embedding: List[float], limit: int = 5) -> List[Dict]:
+    def search_chunks(self, session_id: str, query_embedding: List[float], limit: int = 5, score_threshold: float = None) -> List[Dict]:
         """
         Semantic search over content chunks scoped strictly to the current session.
         Returns list of chunk payloads ordered by relevance.
+
+        Args:
+            limit: Maximum number of chunks to return.
+            score_threshold: If set, only returns chunks with a cosine similarity score
+                             above this value. This gives dynamic result counts instead
+                             of a rigid top-N cutoff.
         """
         if not self.client:
             return []
@@ -145,20 +212,26 @@ class VectorService:
 
         try:
             if hasattr(self.client, "query_points"):
-                results = self.client.query_points(
+                kwargs = dict(
                     collection_name=settings.QDRANT_COLLECTION,
                     query=query_embedding,
                     query_filter=chunk_filter,
-                    limit=limit
-                ).points
+                    limit=limit,
+                )
+                if score_threshold is not None:
+                    kwargs["score_threshold"] = score_threshold
+                results = self.client.query_points(**kwargs).points
                 return [hit.payload for hit in results]
             elif hasattr(self.client, "search"):
-                results = self.client.search(
+                kwargs = dict(
                     collection_name=settings.QDRANT_COLLECTION,
                     query_vector=query_embedding,
                     query_filter=chunk_filter,
-                    limit=limit
+                    limit=limit,
                 )
+                if score_threshold is not None:
+                    kwargs["score_threshold"] = score_threshold
+                results = self.client.search(**kwargs)
                 return [hit.payload for hit in results]
             else:
                 logger.error("QdrantClient missing search methods.")
@@ -167,47 +240,6 @@ class VectorService:
             logger.error(f"Error searching content chunks in Qdrant: {e}")
             return []
 
-    def delete_session_vectors(self, session_id: str):
-        if not self.client:
-            return []
-
-        # Scope results to current session only (prevents cross-session leakage)
-        session_filter = None
-        if session_id:
-            session_filter = models.Filter(
-                must=[
-                    models.FieldCondition(
-                        key="session_id",
-                        match=models.MatchValue(value=session_id)
-                    )
-                ]
-            )
-
-        try:
-            # Try newer query_points API first (v1.10+) or fallback to search
-            if hasattr(self.client, "query_points"):
-                results = self.client.query_points(
-                    collection_name=settings.QDRANT_COLLECTION,
-                    query=query_embedding,
-                    query_filter=session_filter,
-                    limit=limit
-                ).points
-                return [hit.payload for hit in results]
-            elif hasattr(self.client, "search"):
-                results = self.client.search(
-                    collection_name=settings.QDRANT_COLLECTION,
-                    query_vector=query_embedding,
-                    query_filter=session_filter,
-                    limit=limit
-                )
-                return [hit.payload for hit in results]
-            else:
-                available_methods = [m for m in dir(self.client) if not m.startswith("_")]
-                logger.error(f"QdrantClient missing 'search' and 'query_points' methods. Available: {available_methods}")
-                return []
-        except Exception as e:
-            logger.error(f"Error searching Qdrant: {e}")
-            return []
 
     def delete_session_vectors(self, session_id: str):
         if not self.client:

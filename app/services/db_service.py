@@ -25,6 +25,7 @@ class DBService:
                 "updated_at": session.updated_at.isoformat(),
                 "topics": [t.model_dump(by_alias=True) for t in session.topics],
                 "file_manifest": session.file_manifest,
+                "user_id": session.user_id,
             }
             # upsert session
             self.supabase.table("sessions").upsert(data).execute()
@@ -85,6 +86,18 @@ class DBService:
             return [row["id"] for row in response.data]
         except Exception as e:
             logger.error(f"Error getting active session IDs: {e}")
+            return []
+
+    def get_all_sessions_details(self, user_id: str = None) -> List[dict]:
+        """Returns a lightweight list of sessions for a specific user, ordered by most recently updated."""
+        try:
+            query = self.supabase.table("sessions").select("id, updated_at, file_manifest, user_id")
+            if user_id:
+                query = query.eq("user_id", user_id)
+            response = query.order("updated_at", desc=True).execute()
+            return response.data
+        except Exception as e:
+            logger.error(f"Error getting all sessions: {e}")
             return []
 
     def get_messages(self, session_id: str) -> List[Message]:

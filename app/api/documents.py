@@ -35,9 +35,22 @@ from app.models.schemas import Session
 
 router = APIRouter(prefix="/api/sessions/{session_id}/document", tags=["Documents"])
 
-# In-memory cache keyed by session_id
-_document_cache: dict[str, str] = {}
+# Disk-based cache to survive uvicorn reloads
+DOCS_DIR = os.path.join(tempfile.gettempdir(), "kt_assistant_docs")
+os.makedirs(DOCS_DIR, exist_ok=True)
 MIN_DIAGRAM_BYTES = 3000
+
+def _get_doc(session_id: str) -> str | None:
+    path = os.path.join(DOCS_DIR, f"{session_id}.md")
+    if os.path.exists(path):
+        with open(path, "r", encoding="utf-8") as f:
+            return f.read()
+    return None
+
+def _save_doc(session_id: str, markdown: str) -> None:
+    path = os.path.join(DOCS_DIR, f"{session_id}.md")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(markdown)
 
 
 # ---------------------------------------------------------------------------
@@ -48,6 +61,24 @@ class DocumentResponse(BaseModel):
     session_id: str
     markdown: str
     generated_at: datetime = Field(default_factory=datetime.now)
+
+def _get_base_filename(session: Session) -> str:
+    """Generate a clean filename from the repo or file manifest."""
+    if not session.file_manifest:
+        return f"KT_{session.id[:8]}"
+        
+    first_file = session.file_manifest[0]
+    if first_file.startswith("__REPO__:"):
+        # e.g. __REPO__:owner/repo -> owner_repo
+        name = first_file.replace("__REPO__:", "").replace("/", "_")
+    else:
+        # e.g. owner-repo-10/file.py -> file.py
+        parts = first_file.split("/")
+        name = parts[1] if len(parts) > 1 else parts[0]
+        
+    # Sanitize to prevent HTTP header issues
+    name = re.sub(r'[^a-zA-Z0-9_\-]', '_', name)
+    return f"KT_{name}"
 
 
 # ---------------------------------------------------------------------------
@@ -92,7 +123,7 @@ async def generate_document(
 
     markdown = ai_engine.generate_final_summary(session)
     markdown = re.sub(r"<[^>]+>", "", markdown)  # strip stray HTML
-    _document_cache[session_id] = markdown
+    _save_doc(session_id, markdown)
     logger.info(f"[DOC] Document generated for session {session_id} ({len(markdown)} chars)")
     return DocumentResponse(session_id=session_id, markdown=markdown)
 
@@ -107,7 +138,7 @@ async def get_document(
     session: Session = Depends(get_session_or_404),
 ):
     """Returns the last generated markdown document."""
-    markdown = _document_cache.get(session_id)
+    markdown = _get_doc(session_id)
     if not markdown:
         raise NotFoundException(DOCUMENT_NOT_FOUND)
     return DocumentResponse(session_id=session_id, markdown=markdown)
@@ -123,7 +154,7 @@ async def download_pdf(
     session: Session = Depends(get_session_or_404),
 ):
     """Converts the markdown to PDF via Playwright and streams bytes."""
-    markdown = _document_cache.get(session_id)
+    markdown = _get_doc(session_id)
     if not markdown:
         raise NotFoundException(DOCUMENT_NOT_FOUND)
 
@@ -161,14 +192,16 @@ img {{ max-width:100%; display:block; margin:20px auto; }}
         with open(html_path, "w", encoding="utf-8") as f:
             f.write(full_html)
         script_path = os.path.join(
-            os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))),
+            os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
             "scripts", "generate_pdf.py",
         )
         subprocess.run([sys.executable, script_path, html_path, pdf_path], check=True, timeout=120)
         with open(pdf_path, "rb") as f:
             pdf_bytes = f.read()
+            
+        base_name = _get_base_filename(session)
         return StreamingResponse(iter([pdf_bytes]), media_type="application/pdf",
-                                 headers={"Content-Disposition": f'attachment; filename="KT_{session_id[:8]}.pdf"'})
+                                 headers={"Content-Disposition": f'attachment; filename="{base_name}.pdf"'})
     except subprocess.CalledProcessError:
         raise AppException(message=DOCUMENT_PDF_ERROR, status_code=500)
     except Exception as e:
@@ -187,7 +220,7 @@ async def download_docx(
     session: Session = Depends(get_session_or_404),
 ):
     """Converts the markdown to DOCX via Pandoc and streams bytes."""
-    markdown = _document_cache.get(session_id)
+    markdown = _get_doc(session_id)
     if not markdown:
         raise NotFoundException(DOCUMENT_NOT_FOUND)
 
@@ -260,10 +293,12 @@ async def download_docx(
 
         with open(docx_path, "rb") as f:
             docx_bytes = f.read()
+            
+        base_name = _get_base_filename(session)
         return StreamingResponse(
             iter([docx_bytes]),
             media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-            headers={"Content-Disposition": f'attachment; filename="KT_{session_id[:8]}.docx"'},
+            headers={"Content-Disposition": f'attachment; filename="{base_name}.docx"'},
         )
     except AppException:
         raise

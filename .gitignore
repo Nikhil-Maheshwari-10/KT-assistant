@@ -15,3 +15,4 @@ logs/
 
 # Test files & temporary artifacts
 tests/
+model_cache/
