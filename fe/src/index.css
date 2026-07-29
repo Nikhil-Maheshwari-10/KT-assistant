@@ -422,6 +422,34 @@ input, textarea, select {
 }
 .form-select:focus { border-color: var(--accent-1); }
 
+.form-checkbox {
+  appearance: none;
+  background: var(--bg-overlay);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  width: 16px;
+  height: 16px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.2s;
+  flex-shrink: 0;
+}
+.form-checkbox:checked {
+  background: var(--accent-1);
+  border-color: var(--accent-1);
+}
+.form-checkbox:checked::after {
+  content: '✓';
+  color: white;
+  font-size: 12px;
+  font-weight: bold;
+}
+.form-checkbox:hover {
+  border-color: var(--accent-1);
+}
+
 /* ──────────────────────────────────────────────────
    Upload Zone
 ────────────────────────────────────────────────── */

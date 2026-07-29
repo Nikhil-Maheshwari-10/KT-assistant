@@ -30,7 +30,7 @@ SESSION_NOT_FOUND         = "Session '{}' not found."
 # Ingest
 # ---------------------------------------------------------------------------
 INGEST_INVALID_URL        = "Cannot parse GitHub URL: '{}'. Use https://github.com/owner/repo format."
-INGEST_NO_BRANCHES        = "No branches found for '{}'. Check the URL or ensure the repo is public."
+INGEST_NO_BRANCHES        = "No branches found for '{}'. Check the URL or if this is a private repository, enable the 'Private Repository' option and provide a token."
 INGEST_REPO_ERROR         = "Repository fetch failed: {}"
 INGEST_FILE_UNSUPPORTED   = "Only PDF and TXT files are supported."
 INGEST_FILE_EMPTY         = "Could not extract text from '{}'."

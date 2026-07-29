@@ -23,6 +23,8 @@ export default function Sidebar({
 
   // GitHub ingest state
   const [githubUrl, setGithubUrl] = useState('');
+  const [githubToken, setGithubToken] = useState('');
+  const [isPrivate, setIsPrivate] = useState(false);
   const [branches, setBranches] = useState([]);
   const [selectedBranch, setSelectedBranch] = useState('');
   const [loadingBranches, setLoadingBranches] = useState(false);
@@ -56,7 +58,7 @@ export default function Sidebar({
     setSelectedBranch('');
     setIngestError(null);
     try {
-      const data = await getBranches(sessionId, githubUrl.trim());
+      const data = await getBranches(sessionId, githubUrl.trim(), githubToken.trim());
       setBranches(data.branches || []);
       if (data.branches?.length) setSelectedBranch(data.branches[0]);
     } catch (e) {
@@ -151,7 +153,7 @@ export default function Sidebar({
     abortRef.current = ctrl;
 
     try {
-      await ingestGithub(targetSessionId, githubUrl.trim(), selectedBranch, (evt) => {
+      await ingestGithub(targetSessionId, githubUrl.trim(), selectedBranch, githubToken.trim(), (evt) => {
         if (evt.type === 'progress') {
           setIngestLog((prev) => [...prev, { kind: 'info', text: evt.message }]);
         } else if (evt.type === 'topic_update') {
@@ -364,21 +366,57 @@ export default function Sidebar({
             {/* GitHub */}
             <div className="sidebar-section">
               <div className="sidebar-section-title">GitHub Repository</div>
-              <div className="form-group">
+              <div className="form-group" style={{ marginBottom: '8px' }}>
                 <input
                   className="form-input"
                   id="github-url-input"
                   placeholder="https://github.com/owner/repo"
                   value={githubUrl}
-                  onChange={(e) => { setGithubUrl(e.target.value); setBranches([]); }}
+                  onChange={(e) => { setGithubUrl(e.target.value); setBranches([]); setIsPrivate(false); setIngestError(null); }}
                   disabled={ingesting}
                 />
               </div>
 
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '16px' }}>
+                <input 
+                  type="checkbox" 
+                  id="private-repo-toggle"
+                  className="form-checkbox"
+                  checked={isPrivate}
+                  onChange={(e) => {
+                    setIsPrivate(e.target.checked);
+                    if (!e.target.checked) setGithubToken('');
+                  }}
+                  disabled={ingesting}
+                />
+                <label htmlFor="private-repo-toggle" style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', cursor: 'pointer', userSelect: 'none' }}>
+                  🔒 Private Repository
+                </label>
+              </div>
+
+              {isPrivate && (
+                <div className="form-group">
+                  <label className="form-label" style={{ display: 'flex', justifyContent: 'space-between' }}>
+                    <span>GitHub PAT Token</span>
+                    <a href="https://github.com/settings/tokens/new?scopes=repo" target="_blank" rel="noreferrer" style={{ fontSize: '0.75rem', color: 'var(--primary)', textDecoration: 'none' }}>Get Token ↗</a>
+                  </label>
+                  <input
+                    type="password"
+                    className="form-input"
+                    id="github-token-input"
+                    placeholder="ghp_xxxxxxxxxxxx"
+                    value={githubToken}
+                    onChange={(e) => { setGithubToken(e.target.value); setIngestError(null); }}
+                    disabled={ingesting}
+                  />
+                  <div className="text-xs text-muted mt-1">Required for private repos. Never stored.</div>
+                </div>
+              )}
+
               <button
                 className="btn btn-secondary btn-full btn-sm"
                 onClick={handleLoadBranches}
-                disabled={!githubUrl.trim() || loadingBranches || ingesting}
+                disabled={!githubUrl.trim() || (isPrivate && !githubToken.trim()) || loadingBranches || ingesting}
                 id="load-branches-btn"
               >
                 {loadingBranches ? (
@@ -406,7 +444,7 @@ export default function Sidebar({
                   <button
                     className="btn btn-primary btn-full"
                     onClick={handleIngestGithub}
-                    disabled={ingesting}
+                    disabled={ingesting || (isPrivate && !githubToken.trim())}
                     id="analyse-repo-btn"
                   >
                     {ingesting ? (

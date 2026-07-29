@@ -32,6 +32,7 @@ graph TD
 ### 🐙 1. GitHub Repository Ingestion
 The primary way to feed the assistant. Point it at any public GitHub repository:
 - **Branch Selection**: Enter a GitHub URL, click **Load Branches** to fetch all available branches, select your desired branch, then click **Analyse Repository**. Supports both full URLs (`https://github.com/owner/repo`) and shorthand (`owner/repo`).
+- **Private Repository Support**: Securely ingest private repositories (both personal and organizational) by toggling the "Private Repository" option and providing a Classic or Fine-Grained GitHub Personal Access Token (PAT).
 - **Priority-Based File Fetching**: Fetches up to 200 files in priority order—READMEs and docs first, then configs, then source code. Skips irrelevant files (locks, binaries, node_modules, etc.).
 - **Smart Chunking**: File contents are split into overlapping chunks (default 1000 chars, 100 overlap) and stored in Qdrant for RAG-powered Q&A.
 - **Budget Limits**: Caps total ingestion at 500 KB of text to keep LLM calls practical and fast.
@@ -79,7 +80,7 @@ The generated document includes an executive summary, architecture diagrams (Mer
 | **PDF Rendering** | Playwright (headless Chromium) |
 | **DOCX Generation** | Pandoc + python-docx |
 | **Embeddings** | FastEmbed (sentence-transformers/all-MiniLM-L6-v2) |
-| **GitHub API** | GitHub REST API v3 (public repos) |
+| **GitHub API** | GitHub REST API v3 (public & private repos via PAT) |
 
 ---
 
@@ -132,6 +133,16 @@ Configure your `.env` file with the following parameters:
 | `SECONDARY_MODEL_NAME` | Model for chat Q&A streaming |
 | `TERTIARY_MODEL_NAME` | Model for conversation history summarization & consolidation |
 | `EMBEDDING_MODEL` | Local FastEmbed model for generating vector embeddings |
+| `SESSION_EXPIRY_HOURS` | Hours after which idle sessions are auto-deleted on startup |
+| `KT_CONFIDENCE_THRESHOLD` | Minimum confidence % before a topic is indexed into Qdrant |
+| `INGEST_MAX_CONCURRENCY` | Max simultaneous repository ingest operations |
+| `INGEST_TIMEOUT_SECONDS` | Max seconds allowed for a full repo ingest |
+| `CHAT_TIMEOUT_SECONDS` | Max seconds for a single chat SSE stream |
+| `MAX_FILES` | Max files fetched per repository |
+| `MAX_CHUNKS` | Max vector chunks stored per ingest |
+| `CHUNK_SIZE` | Characters per text chunk for RAG indexing |
+| `CHUNK_OVERLAP` | Overlap between consecutive chunks |
+| `MEMORY_MAX_TURNS` | Max conversation turns held in context before summarization |
 
 ### 4. Supabase Schema
 Run the following SQL in your Supabase SQL editor to create the required tables:
@@ -208,16 +219,24 @@ uvicorn main:app --reload
 
 ```text
 ├── app/
+│   ├── api/
+│   │   ├── chat.py             # Chat SSE endpoint with intent routing
+│   │   ├── ingest.py           # GitHub & file ingest endpoints (public & private repos)
+│   │   ├── session.py          # Session create/read/delete endpoints
+│   │   └── document.py         # KT document generation & export endpoints
 │   ├── core/
-│   │   ├── config.py           # Pydantic settings (reads from .env)
-│   │   └── logger.py           # Loguru logger setup
+│   │   ├── config.py           # Pydantic settings (all tunables, reads from .env)
+│   │   ├── exceptions.py       # Custom HTTP exception types
+│   │   ├── messages.py         # Centralised user-facing message strings
+│   │   └── logger.py           # Structured colour-coded logger setup
 │   ├── models/
 │   │   └── schemas.py          # Pydantic schemas: Session, Topic, Message, TopicKnowledge
 │   └── services/
 │       ├── ai_engine.py        # Intent classification, RAG routing, KT analysis & doc generation
 │       ├── db_service.py       # Supabase CRUD (sessions, messages, TTL cleanup)
 │       ├── vector_service.py   # Qdrant: upsert/search chunks & summaries, zombie purge
-│       ├── github_service.py   # GitHub API ingestion: branch listing, file tree, chunking
+│       ├── github_service.py   # GitHub API ingestion: branch listing, file tree, chunking (public & private)
+│       ├── memory_service.py   # Conversation memory: rolling window & summarisation
 │       └── doc_processor.py    # PDF/TXT text extraction for file uploads
 ├── fe/                         # React/Vite Frontend
 │   └── src/                    # Frontend source code
@@ -225,7 +244,7 @@ uvicorn main:app --reload
 │   └── generate_pdf.py         # Standalone Playwright PDF renderer (subprocess-safe)
 ├── ui/
 │   └── streamlit.py            # Streamlit UI: chat, sidebar, export (PDF/DOCX)
-├── main.py                     # Entry point
+├── main.py                     # FastAPI entry point & startup lifecycle
 ├── packages.txt                # System-level apt packages for Streamlit Cloud
 └── pyproject.toml              # Poetry dependency manifest
 ```
@@ -236,6 +255,7 @@ uvicorn main:app --reload
 
 - **Data TTL**: Sessions have a **6-hour Time-To-Live (TTL)**. On each app startup, the system automatically purges expired Supabase records and their associated orphaned Qdrant vector embeddings ("zombie" cleanup).
 - **Session Isolation**: Each KT session carries a unique UUID. Qdrant searches are always scoped by `session_id`—knowledge is never leaked between sessions.
+- **Stateless Credentials**: GitHub Personal Access Tokens (PATs) used for private repository ingestion are processed strictly in volatile RAM. They are **never** persisted to a database, logged to the console, or written to disk.
 - **Ephemeral Processing**: PDF and DOCX generation happens entirely in temporary files that are deleted immediately after the bytes are read into memory.
 - **Cloud Deployment**: A `packages.txt` is included with all required system libraries to run Playwright's headless Chromium on Streamlit Cloud.
 
