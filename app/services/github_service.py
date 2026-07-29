@@ -188,12 +188,30 @@ def fetch_branches(github_url: str, token: Optional[str] = None) -> list[str]:
     owner, repo, _ = parsed
     url = f"{GITHUB_API}/repos/{owner}/{repo}/branches"
     
+    if token:
+        logger.info(f"Fetching branches for {owner}/{repo} (using GitHub PAT token)")
+    else:
+        logger.info(f"Fetching branches for {owner}/{repo} (anonymous access)")
+        
     try:
         resp = requests.get(url, headers=_build_headers(token), timeout=10)
         resp.raise_for_status()
         return [branch["name"] for branch in resp.json()]
+    except requests.exceptions.HTTPError as e:
+        status = e.response.status_code if e.response is not None else "?"
+        auth_status = "with PAT token" if token else "anonymous"
+        if status == 401:
+            logger.warning(f"GitHub API Unauthorized (401) for {owner}/{repo} [{auth_status}]. Token is invalid or expired.")
+        elif status == 404:
+            logger.warning(f"GitHub API Not Found (404) for {owner}/{repo} [{auth_status}]. Typo or private repo missing access.")
+        elif status == 403:
+            logger.warning(f"GitHub API Forbidden (403) for {owner}/{repo} [{auth_status}]. Rate limit or SSO enforcement.")
+        else:
+            logger.warning(f"GitHub API Error ({status}) for {owner}/{repo} [{auth_status}]: {e}")
+        return []
     except Exception as e:
-        logger.warning(f"Could not fetch branches for {owner}/{repo}: {e}")
+        auth_status = "with PAT token" if token else "anonymous"
+        logger.warning(f"Could not fetch branches for {owner}/{repo} [{auth_status}]: {e}")
         return []
 
 
@@ -253,7 +271,10 @@ def fetch_repo_content(github_url: str, token: Optional[str] = None) -> GitHubIn
         )
 
     owner, repo, branch_hint = parsed
-    logger.info(f"GitHub ingestion started for {owner}/{repo}")
+    if token:
+        logger.info(f"GitHub ingestion started for {owner}/{repo} (using GitHub PAT token)")
+    else:
+        logger.info(f"GitHub ingestion started for {owner}/{repo} (anonymous access)")
 
     # 2. Resolve branch
     branch = branch_hint or _get_default_branch(owner, repo, token)
@@ -264,15 +285,29 @@ def fetch_repo_content(github_url: str, token: Optional[str] = None) -> GitHubIn
         tree = _get_repo_tree(owner, repo, branch, token)
     except requests.exceptions.HTTPError as e:
         status = e.response.status_code if e.response is not None else "?"
-        if status == 404:
-            result.error = f"Repository '{owner}/{repo}' not found or is private. Check the URL."
+        auth_status = "with PAT token" if token else "anonymous"
+        if status == 401:
+            msg = f"GitHub API Unauthorized (401) for {owner}/{repo} [{auth_status}]. Token is invalid or expired."
+            logger.warning(msg)
+            result.error = msg
+        elif status == 404:
+            msg = f"GitHub API Not Found (404) for {owner}/{repo} [{auth_status}]. Typo or private repo missing access."
+            logger.warning(msg)
+            result.error = msg
         elif status == 403:
-            result.error = "GitHub API rate limit exceeded. Please wait a few minutes and try again."
+            msg = f"GitHub API Forbidden (403) for {owner}/{repo} [{auth_status}]. Rate limit exceeded or SSO enforced."
+            logger.warning(msg)
+            result.error = msg
         else:
-            result.error = f"GitHub API error ({status}): {e}"
+            msg = f"GitHub API Error ({status}) for {owner}/{repo} [{auth_status}]: {e}"
+            logger.warning(msg)
+            result.error = msg
         return result
     except Exception as e:
-        result.error = f"Could not reach GitHub: {e}"
+        auth_status = "with PAT token" if token else "anonymous"
+        msg = f"Could not reach GitHub for {owner}/{repo} [{auth_status}]: {e}"
+        logger.warning(msg)
+        result.error = msg
         return result
 
     # 4. Score and sort files by priority

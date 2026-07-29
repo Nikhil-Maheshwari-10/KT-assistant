@@ -19,7 +19,7 @@ import asyncio
 import json
 from typing import AsyncGenerator, Optional
 
-from fastapi import APIRouter, Depends, UploadFile, File, Query
+from fastapi import APIRouter, Depends, UploadFile, File, Query, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
@@ -66,6 +66,7 @@ _SSE_HEADERS = {
 class IngestGitHubRequest(BaseModel):
     github_url: str = Field(..., description="Full or shorthand GitHub repo URL")
     branch: str = Field(..., description="Branch to ingest")
+    github_token: Optional[str] = Field(None, description="GitHub PAT for private repositories")
 
 
 # ---------------------------------------------------------------------------
@@ -115,6 +116,7 @@ def _index_chunks(session_id: str, chunks: list) -> None:
 
 @router.get("/branches")
 async def list_branches(
+    request: Request,
     session_id: str,
     url: str = Query(..., description="GitHub repo URL e.g. https://github.com/owner/repo"),
     session: Session = Depends(get_session_or_404),
@@ -124,11 +126,16 @@ async def list_branches(
     if not parsed:
         raise BadRequestException(INGEST_INVALID_URL.format(url))
     owner, repo, _ = parsed
-    branches = fetch_branches(url)
+    token = request.query_params.get("token")
+    branches = fetch_branches(url, token=token)
     if not branches:
         from app.core.exceptions import NotFoundException
         from app.core.messages import INGEST_NO_BRANCHES
-        raise NotFoundException(INGEST_NO_BRANCHES.format(f"{owner}/{repo}"))
+        if token:
+            msg = f"No branches found for '{owner}/{repo}'. Check the URL or ensure your PAT token is correct and has access."
+        else:
+            msg = INGEST_NO_BRANCHES.format(f"{owner}/{repo}")
+        raise NotFoundException(msg)
     return {"branches": branches, "owner": owner, "repo": repo}
 
 
@@ -172,9 +179,16 @@ async def ingest_github(
                 final_url = f"https://github.com/{owner}/{repo}/tree/{body.branch}"
                 yield _sse({"type": "progress", "message": f"Fetching files from {owner}/{repo} ({body.branch})…"})
 
-                ingest_result = fetch_repo_content(final_url)
+                ingest_result = fetch_repo_content(final_url, token=body.github_token)
                 if not ingest_result.success:
-                    yield _sse({"type": "error", "message": INGEST_REPO_ERROR.format(ingest_result.error)})
+                    # Surface a more helpful message for private repos
+                    err_msg = ingest_result.error
+                    if "private" in (err_msg or "").lower() or "not found" in (err_msg or "").lower():
+                        if body.github_token:
+                            err_msg = (err_msg or "") + " | Check the URL or ensure your PAT token is correct and has access."
+                        else:
+                            err_msg = (err_msg or "") + " | If this is a private repository, enable the 'Private Repository' option and provide a PAT token."
+                    yield _sse({"type": "error", "message": INGEST_REPO_ERROR.format(err_msg), "is_private": True})
                     yield _sse({"type": "done", "status": "Failed"})
                     return
 

@@ -75,8 +75,11 @@ export async function deleteSession(sessionId) {
 
 // ─── Ingest ──────────────────────────────────────────────────────────────────
 
-export async function getBranches(sessionId, url) {
-  const params = new URLSearchParams({ url });
+export async function getBranches(sessionId, githubUrl, githubToken) {
+  const params = new URLSearchParams({ url: githubUrl });
+  if (githubToken) {
+    params.append('token', githubToken);
+  }
   const res = await fetch(
     `${BASE_URL}/api/sessions/${sessionId}/ingest/branches?${params}`,
     { headers: baseHeaders() }
@@ -92,8 +95,8 @@ export async function getBranches(sessionId, url) {
  * Ingests a GitHub repo via SSE stream.
  * onEvent(event) is called for each SSE message.
  */
-export function ingestGithub(sessionId, githubUrl, branch, onEvent, signal) {
-  const body = JSON.stringify({ github_url: githubUrl, branch });
+export function ingestGithub(sessionId, githubUrl, branch, githubToken, onEvent, signal) {
+  const body = JSON.stringify({ github_url: githubUrl, branch, github_token: githubToken || null });
   return fetch(`${BASE_URL}/api/sessions/${sessionId}/ingest/github`, {
     method: 'POST',
     headers: baseHeaders({ 'Content-Type': 'application/json', Accept: 'text/event-stream' }),
