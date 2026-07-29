@@ -194,9 +194,21 @@ def fetch_branches(github_url: str, token: Optional[str] = None) -> list[str]:
         logger.info(f"Fetching branches for {owner}/{repo} (anonymous access)")
         
     try:
-        resp = requests.get(url, headers=_build_headers(token), timeout=10)
-        resp.raise_for_status()
-        return [branch["name"] for branch in resp.json()]
+        all_branches = []
+        page = 1
+        while True:
+            paginated_url = f"{url}?per_page=100&page={page}"
+            resp = requests.get(paginated_url, headers=_build_headers(token), timeout=10)
+            resp.raise_for_status()
+            data = resp.json()
+            if not data:
+                break
+            all_branches.extend(branch["name"] for branch in data)
+            if len(data) < 100:
+                break  # Last page — no need for another request
+            page += 1
+        logger.info(f"Found {len(all_branches)} branch(es) for {owner}/{repo}")
+        return all_branches
     except requests.exceptions.HTTPError as e:
         status = e.response.status_code if e.response is not None else "?"
         auth_status = "with PAT token" if token else "anonymous"
