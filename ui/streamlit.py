@@ -97,7 +97,7 @@ if "view" not in st.session_state:
 if "cleanup_done" not in st.session_state:
     with st.spinner("Performing periodic maintenance..."):
         # 1. Expire sessions older than 6 hours
-        expired_ids = db_service.cleanup_expired_sessions(hours=6)
+        expired_ids = db_service.cleanup_expired_sessions(hours=settings.SESSION_EXPIRY_HOURS)
         expired_count = len(expired_ids)
         
         # 2. Get whitelist of all remaining active sessions

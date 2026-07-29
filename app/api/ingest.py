@@ -47,7 +47,9 @@ router = APIRouter(prefix="/api/sessions/{session_id}/ingest", tags=["Ingest"])
 # Caps concurrent ingest operations to prevent Gemini free-tier 429 cascades.
 # Each ingest fires multiple LLM + embedding calls; 3 concurrent is safe on
 # the free tier (100 embed req/min, ~1 RPM for large analysis calls).
-_INGEST_SEMAPHORE = asyncio.Semaphore(3)
+from app.core.config import settings
+
+_INGEST_SEMAPHORE = asyncio.Semaphore(settings.INGEST_MAX_CONCURRENCY)
 
 # SSE headers — Connection: keep-alive prevents proxies from closing the stream prematurely
 _SSE_HEADERS = {

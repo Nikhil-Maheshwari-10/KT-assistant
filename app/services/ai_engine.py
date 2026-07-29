@@ -6,6 +6,7 @@ from app.core.logger import logger
 from app.models.schemas import Session, Topic, TopicKnowledge
 from typing import List, Dict, Optional
 import json
+import time
 
 class AIEngine:
     def __init__(self):
@@ -29,8 +30,8 @@ class AIEngine:
             
         self.router = Router(
             model_list=model_list, 
-            num_retries=2,              # Will automatically retry a different key on failure
-            allowed_fails=1             # Number of times a key can fail before being temporarily cooled down
+            num_retries=settings.LLM_ROUTER_NUM_RETRIES,
+            allowed_fails=settings.LLM_ROUTER_ALLOWED_FAILS
         )
 
         logger.info(f"Loading embedding model ({settings.EMBEDDING_MODEL}) via FastEmbed...")
@@ -41,8 +42,8 @@ class AIEngine:
 
     def get_completion(self, messages: List[Dict], response_format: Optional[Dict] = None, model: Optional[str] = None, call_delay: float = 0.5) -> Optional[str]:
         target_model = model or self.primary_model
-        max_retries = 3
-        retry_delay = 2
+        max_retries = settings.LLM_MAX_RETRIES
+        retry_delay = settings.LLM_RETRY_DELAY_SECONDS
 
         for attempt in range(max_retries):
             try:
@@ -104,7 +105,11 @@ class AIEngine:
         if not text:
             return [0.0] * settings.EMBEDDING_DIM
         try:
-            return list(self.embedding_model.embed([text]))[0].tolist()
+            t0 = time.time()
+            result = list(self.embedding_model.embed([text]))[0].tolist()
+            elapsed = time.time() - t0
+            logger.debug(f"Embedding generated in {elapsed:.3f}s | Text length: {len(text)} chars")
+            return result
         except Exception as e:
             logger.error(f"Embedding error: {e}")
             return [0.0] * settings.EMBEDDING_DIM
@@ -113,8 +118,12 @@ class AIEngine:
         if not texts:
             return []
         try:
+            t0 = time.time()
             embeddings = list(self.embedding_model.embed(texts))
-            return [emb.tolist() for emb in embeddings]
+            elapsed = time.time() - t0
+            result = [emb.tolist() for emb in embeddings]
+            logger.info(f"Batch embedding complete | {len(texts)} texts embedded in {elapsed:.2f}s ({elapsed/len(texts)*1000:.1f}ms each)")
+            return result
         except Exception as e:
             logger.error(f"Batch embedding error: {e}")
             return [[0.0] * settings.EMBEDDING_DIM for _ in texts]
@@ -155,6 +164,7 @@ Return ONLY the category name(s) separated by commas. Examples: "CONTENT" or "ST
         valid = {"STRUCTURAL", "CONTENT", "ARCHITECTURE", "OPERATIONAL", "BROAD"}
         intents = [i.strip().upper() for i in response.split(",")]
         result = [i for i in intents if i in valid]
+        logger.debug(f"Intent raw response: '{response.strip()}'")
         logger.info(f"Intent classified: {result} for question: '{question[:60]}'")
         return result or ["CONTENT"]
 
@@ -182,7 +192,7 @@ Return ONLY the category name(s) separated by commas. Examples: "CONTENT" or "ST
         if "CONTENT" in intents:
             # Use a permissive score_threshold so short/vague questions still get results.
             query_embedding = self.get_embedding(question)
-            chunks = vector_service.search_chunks(session_id, query_embedding, limit=settings.RAG_CONTEXT_SIZE, score_threshold=0.2)
+            chunks = vector_service.search_chunks(session_id, query_embedding, limit=settings.RAG_CONTEXT_SIZE, score_threshold=settings.RAG_THRESHOLD_CONTENT)
             if chunks:
                 chunk_context = "\n\n---\n\n".join(
                     f"[{c.get('file_path', 'unknown')}]\n{c.get('content', '')}" for c in chunks
@@ -203,7 +213,7 @@ Return ONLY the category name(s) separated by commas. Examples: "CONTENT" or "ST
                 )
             # Supplemental vector search for architecture-level code evidence
             query_embedding = self.get_embedding(question)
-            arch_chunks = vector_service.search_chunks(session_id, query_embedding, limit=settings.RAG_CONTEXT_SIZE, score_threshold=0.2)
+            arch_chunks = vector_service.search_chunks(session_id, query_embedding, limit=settings.RAG_CONTEXT_SIZE, score_threshold=settings.RAG_THRESHOLD_CONTENT)
             if arch_chunks:
                 arch_chunk_context = "\n\n---\n\n".join(
                     f"[{c.get('file_path', 'unknown')}]\n{c.get('content', '')}" for c in arch_chunks
@@ -221,7 +231,7 @@ Return ONLY the category name(s) separated by commas. Examples: "CONTENT" or "ST
                 )
             # Supplemental search for actual raw deployment artifacts
             ops_embedding = self.get_embedding(question + " deploy docker setup environment installation")
-            ops_chunks = vector_service.search_chunks(session_id, ops_embedding, limit=settings.RAG_CONTEXT_SIZE, score_threshold=0.15)
+            ops_chunks = vector_service.search_chunks(session_id, ops_embedding, limit=settings.RAG_CONTEXT_SIZE, score_threshold=settings.RAG_THRESHOLD_OPERATIONAL)
             if ops_chunks:
                 ops_chunk_context = "\n\n---\n\n".join(
                     f"[{c.get('file_path', 'unknown')}]\n{c.get('content', '')}" for c in ops_chunks
@@ -238,7 +248,7 @@ Return ONLY the category name(s) separated by commas. Examples: "CONTENT" or "ST
             context_parts.append(f"## Full System Knowledge\n{all_topics}")
             # Supplemental vector search to find supporting raw-code evidence
             query_embedding = self.get_embedding(question)
-            broad_chunks = vector_service.search_chunks(session_id, query_embedding, limit=settings.RAG_CONTEXT_SIZE, score_threshold=0.15)
+            broad_chunks = vector_service.search_chunks(session_id, query_embedding, limit=settings.RAG_CONTEXT_SIZE, score_threshold=settings.RAG_THRESHOLD_BROAD)
             if broad_chunks:
                 broad_chunk_context = "\n\n---\n\n".join(
                     f"[{c.get('file_path', 'unknown')}]\n{c.get('content', '')}" for c in broad_chunks
@@ -257,6 +267,10 @@ Return ONLY the category name(s) separated by commas. Examples: "CONTENT" or "ST
                 context_parts.append(f"## Relevant Content (fallback)\n{chunk_context}")
                 intents = ["CONTENT"]
 
+        logger.info(
+            f"Context built | Intents: {intents} | Sources: {len(context_parts)} section(s) | "
+            f"Total context chars: {sum(len(p) for p in context_parts)}"
+        )
         return context_parts, intents
 
     def route_and_stream(
@@ -314,6 +328,9 @@ If the answer cannot be found in the Context or Conversation History, say: "This
         messages.append({"role": "user", "content": question})
 
         def _token_stream():
+            stream_start = time.time()
+            token_count = 0
+            logger.info(f"Stream started | Model: {self.secondary_model} | Session: {session_id} | Intents: {intents}")
             try:
                 response = self.router.completion(
                     model=self.secondary_model,
@@ -323,16 +340,18 @@ If the answer cannot be found in the Context or Conversation History, say: "This
                 for chunk in response:
                     token = chunk.choices[0].delta.content
                     if token:
+                        token_count += 1
                         yield token
+                elapsed = time.time() - stream_start
+                logger.info(f"Stream complete | {token_count} tokens in {elapsed:.2f}s | Session: {session_id}")
             except litellm.RateLimitError as e:
                 import re
-                import time
                 logger.error(f"All API keys rate limited: {e}")
                 
                 # Extract suggested retry delay for logging purposes
                 suggested = re.search(r'retry.*?(\d+(?:\.\d+)?)s', str(e), re.IGNORECASE)
                 if suggested:
-                    wait_time = min(int(float(suggested.group(1))) + 1, 90)
+                    wait_time = min(int(float(suggested.group(1))) + 1, settings.LLM_MAX_RETRY_WAIT_SECONDS)
                     logger.warning(f"All API keys exhausted. Google suggests waiting {wait_time}s.")
                 
                 yield "\n\n_(Chat is currently busy. Please try again after some time.)_"

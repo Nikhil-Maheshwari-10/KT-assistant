@@ -14,9 +14,10 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, HTMLResponse
 
 from app.core.logger import logger
+from app.core.config import settings
 from app.services.db_service import db_service
 from app.services.vector_service import vector_service
 from app.api import sessions, ingest, chat, documents
@@ -32,7 +33,7 @@ async def lifespan(app: FastAPI):
     """Run maintenance tasks on startup, clean up on shutdown."""
     logger.info("KT-Assistant API starting up…")
     try:
-        expired_ids = db_service.cleanup_expired_sessions(hours=6)
+        expired_ids = db_service.cleanup_expired_sessions(hours=settings.SESSION_EXPIRY_HOURS)
         active_ids = db_service.get_all_active_session_ids()
         zombie_count = vector_service.purge_zombie_vectors(active_ids)
         
@@ -78,6 +79,17 @@ app.include_router(sessions.router)
 app.include_router(ingest.router)
 app.include_router(chat.router)
 app.include_router(documents.router)
+
+
+@app.get("/", tags=["Root"])
+async def root():
+    """Simple friendly JSON message for the root endpoint."""
+    return {
+        "message": "Welcome to the KT-Assistant API! 🚀",
+        "interactive_docs": "/docs",
+        "system_health": "/health",
+        "status": "online"
+    }
 
 
 @app.get("/health", tags=["Health"])
@@ -132,4 +144,4 @@ elif __name__ == "__main__":
     print("🚀 KT-Assistant API  →  http://localhost:8000")
     print("   Docs              →  http://localhost:8000/docs")
     print("   Press Ctrl+C to stop.\n")
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True, log_level="info")
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True, log_level="warning", access_log=False)
