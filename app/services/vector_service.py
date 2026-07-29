@@ -172,14 +172,17 @@ class VectorService:
             ))
 
         try:
-            # Batch upsert in groups of 50 to avoid request size limits
-            batch_size = 50
+            # Batch upsert in groups to avoid request size limits
+            batch_size = settings.QDRANT_UPSERT_BATCH_SIZE
+            total_batches = (len(points) + batch_size - 1) // batch_size
             for i in range(0, len(points), batch_size):
+                batch_num = (i // batch_size) + 1
                 self.client.upsert(
                     collection_name=settings.QDRANT_COLLECTION,
                     points=points[i:i + batch_size]
                 )
-            logger.info(f"Indexed {len(points)} content chunks for session {session_id}")
+                logger.debug(f"Qdrant upsert batch {batch_num}/{total_batches} ({len(points[i:i + batch_size])} points) | Session: {session_id}")
+            logger.info(f"Indexed {len(points)} content chunks across {total_batches} batch(es) for session {session_id}")
         except Exception as e:
             logger.error(f"Error upserting content chunks to Qdrant: {e}")
 
@@ -217,11 +220,23 @@ class VectorService:
                     query=query_embedding,
                     query_filter=chunk_filter,
                     limit=limit,
+                    with_payload=True,
                 )
                 if score_threshold is not None:
                     kwargs["score_threshold"] = score_threshold
-                results = self.client.query_points(**kwargs).points
-                return [hit.payload for hit in results]
+                raw_results = self.client.query_points(**kwargs).points
+                results = [hit.payload for hit in raw_results]
+                top_score = raw_results[0].score if raw_results else None
+                logger.info(
+                    f"Qdrant search | Session: {session_id} | "
+                    f"Returned: {len(results)}/{limit} chunks | "
+                    f"Threshold: {score_threshold} | "
+                    f"Top score: {top_score:.4f}" if top_score is not None else
+                    f"Qdrant search | Session: {session_id} | "
+                    f"Returned: {len(results)}/{limit} chunks | "
+                    f"Threshold: {score_threshold} | Top score: N/A"
+                )
+                return results
             elif hasattr(self.client, "search"):
                 kwargs = dict(
                     collection_name=settings.QDRANT_COLLECTION,
@@ -231,8 +246,19 @@ class VectorService:
                 )
                 if score_threshold is not None:
                     kwargs["score_threshold"] = score_threshold
-                results = self.client.search(**kwargs)
-                return [hit.payload for hit in results]
+                raw_results = self.client.search(**kwargs)
+                results = [hit.payload for hit in raw_results]
+                top_score = raw_results[0].score if raw_results else None
+                logger.info(
+                    f"Qdrant search | Session: {session_id} | "
+                    f"Returned: {len(results)}/{limit} chunks | "
+                    f"Threshold: {score_threshold} | "
+                    f"Top score: {top_score:.4f}" if top_score is not None else
+                    f"Qdrant search | Session: {session_id} | "
+                    f"Returned: {len(results)}/{limit} chunks | "
+                    f"Threshold: {score_threshold} | Top score: N/A"
+                )
+                return results
             else:
                 logger.error("QdrantClient missing search methods.")
                 return []

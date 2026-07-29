@@ -205,10 +205,11 @@ Return ONLY the summary, no preamble."""
             payload["summaries"] = summaries
             payload["updated_at"] = time.time()
             self._save_payload(session_id, payload)
-            logger.info(f"[MEMORY] Summary stored for session {session_id}: \"{summary[:60]}...\"")
-
+            
             # Check if consolidation is needed
             completed_turns = [t for t in summaries if t.get("summary") is not None]
+            logger.info(f"[MEMORY] Summary stored for session {session_id} ({len(completed_turns)} turns total)")
+
             if len(completed_turns) >= settings.MEMORY_CONSOLIDATION_THRESHOLD:
                 import threading
                 threading.Thread(

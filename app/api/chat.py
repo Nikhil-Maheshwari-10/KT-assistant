@@ -78,6 +78,7 @@ async def chat(
     """
     question = body.question.strip()
     timeout = settings.CHAT_TIMEOUT_SECONDS
+    logger.info(f"[CHAT] Q: {question[:120]}")
 
     # Persist user message immediately so it appears in the chat UI
     db_service.save_message(session_id, Message(role="user", content=question))
@@ -145,6 +146,7 @@ async def chat(
             elif msg_type == "done":
                 full_answer = "".join(full_parts)
                 db_service.save_message(session_id, Message(role="assistant", content=full_answer))
+                logger.info(f"[CHAT] A: {full_answer[:120]}{'...' if len(full_answer) > 120 else ''}")
                 yield _sse({"type": "done", "full_answer": full_answer, "intents": intents_result, "status": "Success"})
                 # Stage 3: summarize the Q&A pair in a background thread so it
                 # doesn't block the SSE stream. The summary is stored in Qdrant
