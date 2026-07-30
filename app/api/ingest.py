@@ -127,7 +127,7 @@ async def list_branches(
         raise BadRequestException(INGEST_INVALID_URL.format(url))
     owner, repo, _ = parsed
     token = request.query_params.get("token")
-    branches = fetch_branches(url, token=token)
+    branches = await asyncio.to_thread(fetch_branches, url, token=token)
     if not branches:
         from app.core.exceptions import NotFoundException
         from app.core.messages import INGEST_NO_BRANCHES
@@ -179,7 +179,7 @@ async def ingest_github(
                 final_url = f"https://github.com/{owner}/{repo}/tree/{body.branch}"
                 yield _sse({"type": "progress", "message": f"Fetching files from {owner}/{repo} ({body.branch})…"})
 
-                ingest_result = fetch_repo_content(final_url, token=body.github_token)
+                ingest_result = await asyncio.to_thread(fetch_repo_content, final_url, token=body.github_token)
                 if not ingest_result.success:
                     # Surface a more helpful message for private repos
                     err_msg = ingest_result.error
@@ -197,7 +197,7 @@ async def ingest_github(
                     "message": f"Fetched {len(ingest_result.files_fetched)} files ({ingest_result.total_chars / 1024:.1f} KB). Running AI analysis…",
                 })
 
-                db_service.save_message(session_id, Message(
+                await asyncio.to_thread(db_service.save_message, session_id, Message(
                     role="assistant",
                     content=(
                         f"🐙 **GitHub Repository Ingested:** `{ingest_result.owner}/{ingest_result.repo}` "
@@ -209,7 +209,7 @@ async def ingest_github(
                 # Inject a special tag at the beginning so the UI knows the repo and branch name.
                 session.file_manifest = [f"__REPO__:{ingest_result.repo} ({ingest_result.branch})"] + ingest_result.files_fetched
 
-                all_results = ai_engine.multi_topic_validate_and_score(session, ingest_result.aggregated_text)
+                all_results = await asyncio.to_thread(ai_engine.multi_topic_validate_and_score, session, ingest_result.aggregated_text)
                 for topic in session.topics:
                     if topic.id not in all_results:
                         continue
@@ -227,18 +227,18 @@ async def ingest_github(
                     if topic.confidence_score >= settings.KT_CONFIDENCE_THRESHOLD and not topic.is_complete:
                         topic.is_complete = True
                         summary_text = json.dumps(topic.knowledge.model_dump(), indent=2)
-                        embedding = ai_engine.get_embedding(f"Topic: {topic.name}\nContent: {summary_text}")
-                        vector_service.upsert_topic_summary(session_id, topic.name, summary_text, embedding)
+                        embedding = await asyncio.to_thread(ai_engine.get_embedding, f"Topic: {topic.name}\nContent: {summary_text}")
+                        await asyncio.to_thread(vector_service.upsert_topic_summary, session_id, topic.name, summary_text, embedding)
                         yield _sse({"type": "progress", "message": f"✅ '{topic.name}' indexed for Q&A."})
 
                 session.overall_confidence = int(
                     sum(t.confidence_score for t in session.topics) / len(session.topics)
                 )
-                db_service.save_session(session)
+                await asyncio.to_thread(db_service.save_session, session)
 
                 if ingest_result.chunks:
                     yield _sse({"type": "progress", "message": f"Indexing {len(ingest_result.chunks)} content chunks…"})
-                    _index_chunks(session_id, ingest_result.chunks)
+                    await asyncio.to_thread(_index_chunks, session_id, ingest_result.chunks)
 
                 logger.info(f"[INGEST] GitHub repo ingested: {ingest_result.summary}")
                 yield _sse({
@@ -309,7 +309,7 @@ async def ingest_file(
             try:
                 yield _sse({"type": "progress", "message": f"Extracting {file.filename}…"})
 
-                ingest_result = process_zip_file(zip_bytes, file.filename)
+                ingest_result = await asyncio.to_thread(process_zip_file, zip_bytes, file.filename)
                 if not ingest_result.success:
                     yield _sse({"type": "error", "message": INGEST_REPO_ERROR.format(ingest_result.error)})
                     yield _sse({"type": "done", "status": "Failed"})
@@ -320,7 +320,7 @@ async def ingest_file(
                     "message": f"Extracted {len(ingest_result.files_fetched)} files ({ingest_result.total_chars / 1024:.1f} KB). Running AI analysis…",
                 })
 
-                db_service.save_message(session_id, Message(
+                await asyncio.to_thread(db_service.save_message, session_id, Message(
                     role="assistant",
                     content=(
                         f"🐙 **ZIP Archive Ingested:** `{ingest_result.repo}`\n\n"
@@ -330,7 +330,7 @@ async def ingest_file(
 
                 session.file_manifest = [f"__REPO__:{ingest_result.repo} (zip)"] + ingest_result.files_fetched
 
-                all_results = ai_engine.multi_topic_validate_and_score(session, ingest_result.aggregated_text)
+                all_results = await asyncio.to_thread(ai_engine.multi_topic_validate_and_score, session, ingest_result.aggregated_text)
                 for topic in session.topics:
                     if topic.id not in all_results:
                         continue
@@ -348,18 +348,18 @@ async def ingest_file(
                     if topic.confidence_score >= settings.KT_CONFIDENCE_THRESHOLD and not topic.is_complete:
                         topic.is_complete = True
                         summary_text = json.dumps(topic.knowledge.model_dump(), indent=2)
-                        embedding = ai_engine.get_embedding(f"Topic: {topic.name}\nContent: {summary_text}")
-                        vector_service.upsert_topic_summary(session_id, topic.name, summary_text, embedding)
+                        embedding = await asyncio.to_thread(ai_engine.get_embedding, f"Topic: {topic.name}\nContent: {summary_text}")
+                        await asyncio.to_thread(vector_service.upsert_topic_summary, session_id, topic.name, summary_text, embedding)
                         yield _sse({"type": "progress", "message": f"✅ '{topic.name}' indexed for Q&A."})
 
                 session.overall_confidence = int(
                     sum(t.confidence_score for t in session.topics) / len(session.topics)
                 )
-                db_service.save_session(session)
+                await asyncio.to_thread(db_service.save_session, session)
 
                 if ingest_result.chunks:
                     yield _sse({"type": "progress", "message": f"Indexing {len(ingest_result.chunks)} content chunks…"})
-                    _index_chunks(session_id, ingest_result.chunks)
+                    await asyncio.to_thread(_index_chunks, session_id, ingest_result.chunks)
 
                 logger.info(f"[INGEST] ZIP archive ingested: {ingest_result.summary}")
                 yield _sse({
