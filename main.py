@@ -12,16 +12,14 @@ from contextlib import asynccontextmanager
 # Project root on sys.path so all `app.*` imports resolve
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, HTMLResponse
 
 from app.core.logger import logger
-from app.core.config import settings
-from app.services.db_service import db_service
+from app.api import sessions, ingest, chat, documents, health
+from app.core.exceptions import AppException, app_exception_handler
+from app.core.scheduler import start_scheduler, stop_scheduler
 from app.services.vector_service import vector_service
-from app.api import sessions, ingest, chat, documents
-from app.core.exceptions import AppException
 
 
 # ---------------------------------------------------------------------------
@@ -33,25 +31,20 @@ async def lifespan(app: FastAPI):
     """Run maintenance tasks on startup, clean up on shutdown."""
     logger.info("KT-Assistant API starting up…")
     try:
-        expired_ids = db_service.cleanup_expired_sessions(hours=settings.SESSION_EXPIRY_HOURS)
-        active_ids = db_service.get_all_active_session_ids()
-        zombie_count = vector_service.purge_zombie_vectors(active_ids)
-        
-        # Ensure memory collection exists
+        # Ensure memory collection exists in Qdrant
         vector_service.ensure_memory_collection()
         
-        logger.info(
-            f"Startup cleanup: {len(expired_ids)} expired sessions removed, "
-            f"{zombie_count} zombie vectors purged."
-        )
+        # Start background task scheduler (fires cleanup immediately + every 6h)
+        start_scheduler()
     except Exception as e:
-        logger.warning(f"Startup cleanup failed (non-fatal): {e}")
+        logger.warning(f"Startup tasks failed (non-fatal): {e}")
     yield
+    stop_scheduler()
     logger.info("KT-Assistant API shutting down.")
 
 
 # ---------------------------------------------------------------------------
-# FastAPI app
+# FastAPI app setup
 # ---------------------------------------------------------------------------
 
 app = FastAPI(
@@ -75,49 +68,19 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Register exception handlers
+app.add_exception_handler(AppException, app_exception_handler)
+
+# Include routers
+app.include_router(health.router)
 app.include_router(sessions.router)
 app.include_router(ingest.router)
 app.include_router(chat.router)
 app.include_router(documents.router)
 
 
-@app.get("/", tags=["Root"])
-async def root():
-    """Simple friendly JSON message for the root endpoint."""
-    return {
-        "message": "Welcome to the KT-Assistant API! 🚀",
-        "interactive_docs": "/docs",
-        "system_health": "/health",
-        "status": "online"
-    }
-
-
-@app.get("/health", tags=["Health"])
-async def health():
-    """Simple liveness probe."""
-    return {"status": "ok", "service": "KT-Assistant API"}
-
-
 # ---------------------------------------------------------------------------
-# Global exception handler — uniform error JSON shape
-# ---------------------------------------------------------------------------
-
-@app.exception_handler(AppException)
-async def app_exception_handler(request: Request, exc: AppException) -> JSONResponse:
-    """
-    Catches all AppException subclasses (NotFoundException, BadRequestException, etc.)
-    and returns a consistent {"error": "..."} JSON body.
-    Unexpected 5xx errors are logged at ERROR level; client 4xx errors at WARNING.
-    """
-    if exc.status_code >= 500:
-        logger.error(f"[API] {exc.status_code} on {request.method} {request.url.path}: {exc.detail}")
-    else:
-        logger.warning(f"[API] {exc.status_code} on {request.method} {request.url.path}: {exc.detail}")
-    return JSONResponse(status_code=exc.status_code, content={"error": exc.detail})
-
-
-# ---------------------------------------------------------------------------
-# Entry point — `python main.py`
+# Entry point
 # ---------------------------------------------------------------------------
 
 def _is_running_via_streamlit() -> bool:
@@ -145,3 +108,4 @@ elif __name__ == "__main__":
     print("   Docs              →  http://localhost:8000/docs")
     print("   Press Ctrl+C to stop.\n")
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True, log_level="warning", access_log=False)
+

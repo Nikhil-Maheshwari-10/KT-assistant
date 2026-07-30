@@ -6,7 +6,7 @@ from app.core.config import settings
 # Maps verbose module paths to short, readable labels shown in the terminal.
 _MODULE_LABELS = {
     "app.services.ai_engine":     "AI      ",
-    "app.services.vector_service":"QDRANT  ",
+    "app.services.vector_service":"VECTOR  ",
     "app.services.db_service":    "DB      ",
     "app.services.github_service":"GITHUB  ",
     "app.services.memory_service":"MEMORY  ",
@@ -15,6 +15,7 @@ _MODULE_LABELS = {
     "app.api.chat":               "CHAT    ",
     "app.api.documents":          "DOCS    ",
     "app.core.logger":            "SYSTEM  ",
+    "app.core.scheduler":         "CLEANUP ",
     "main":                       "SERVER  ",
 }
 
@@ -54,8 +55,10 @@ def _format(record):
         lvl_tag    = level[:3]
 
     # Module label gets a fixed color per category for quick visual grouping
-    if label.strip() in ("QDRANT", "DB"):
+    if label.strip() in ("VECTOR", "DB"):
         label_tag = f"<magenta>{label}</magenta>"
+    elif label.strip() == "CLEANUP":
+        label_tag = f"<red>{label}</red>"
     elif label.strip() in ("AI",):
         label_tag = f"<blue><bold>{label}</bold></blue>"
     elif label.strip() in ("INGEST", "GITHUB"):
