@@ -151,6 +151,7 @@ Run the following SQL in your Supabase SQL editor to create the required tables:
 -- Sessions table
 CREATE TABLE sessions (
     id UUID PRIMARY KEY,
+    user_id TEXT,
     overall_confidence INT DEFAULT 0,
     status TEXT DEFAULT 'active',
     topics JSONB,
@@ -223,11 +224,13 @@ uvicorn main:app --reload
 │   │   ├── chat.py             # Chat SSE endpoint with intent routing
 │   │   ├── ingest.py           # GitHub & file ingest endpoints (public & private repos)
 │   │   ├── session.py          # Session create/read/delete endpoints
-│   │   └── document.py         # KT document generation & export endpoints
+│   │   ├── document.py         # KT document generation & export endpoints
+│   │   └── health.py           # Root and health check endpoints
 │   ├── core/
 │   │   ├── config.py           # Pydantic settings (all tunables, reads from .env)
 │   │   ├── exceptions.py       # Custom HTTP exception types
 │   │   ├── messages.py         # Centralised user-facing message strings
+│   │   ├── scheduler.py        # Background APScheduler jobs (e.g. TTL cleanup)
 │   │   └── logger.py           # Structured colour-coded logger setup
 │   ├── models/
 │   │   └── schemas.py          # Pydantic schemas: Session, Topic, Message, TopicKnowledge
@@ -253,7 +256,7 @@ uvicorn main:app --reload
 
 ## 🛡️ Privacy & Maintenance
 
-- **Data TTL**: Sessions have a **6-hour Time-To-Live (TTL)**. On each app startup, the system automatically purges expired Supabase records and their associated orphaned Qdrant vector embeddings ("zombie" cleanup).
+- **Data TTL**: Sessions have a **6-hour Time-To-Live (TTL)**. A background scheduler (APScheduler) runs periodically to automatically purge expired Supabase records and their associated orphaned Qdrant vector embeddings ("zombie" cleanup).
 - **Session Isolation**: Each KT session carries a unique UUID. Qdrant searches are always scoped by `session_id`—knowledge is never leaked between sessions.
 - **Stateless Credentials**: GitHub Personal Access Tokens (PATs) used for private repository ingestion are processed strictly in volatile RAM. They are **never** persisted to a database, logged to the console, or written to disk.
 - **Ephemeral Processing**: PDF and DOCX generation happens entirely in temporary files that are deleted immediately after the bytes are read into memory.

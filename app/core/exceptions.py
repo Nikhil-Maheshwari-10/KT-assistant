@@ -54,3 +54,24 @@ class GatewayTimeoutException(AppException):
     """504 — Downstream service took too long to respond."""
     def __init__(self, message: Optional[str] = None):
         super().__init__(message=message, status_code=504)
+
+
+# ---------------------------------------------------------------------------
+# Global exception handler — uniform error JSON shape
+# ---------------------------------------------------------------------------
+
+from fastapi import Request
+from fastapi.responses import JSONResponse
+from app.core.logger import logger
+
+async def app_exception_handler(request: Request, exc: AppException) -> JSONResponse:
+    """
+    Catches all AppException subclasses (NotFoundException, BadRequestException, etc.)
+    and returns a consistent {"error": "..."} JSON body.
+    Unexpected 5xx errors are logged at ERROR level; client 4xx errors at WARNING.
+    """
+    if exc.status_code >= 500:
+        logger.error(f"[API] {exc.status_code} on {request.method} {request.url.path}: {exc.detail}")
+    else:
+        logger.warning(f"[API] {exc.status_code} on {request.method} {request.url.path}: {exc.detail}")
+    return JSONResponse(status_code=exc.status_code, content={"error": exc.detail})
